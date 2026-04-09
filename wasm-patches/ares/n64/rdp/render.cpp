@@ -196,11 +196,51 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
 
 // ── Command dispatch ─────────────────────────────────────────
 
+#if defined(USE_ANGRYLION)
+extern "C" {
+  #include "angrylion_bridge.h"
+}
+static bool angrylion_initialized = false;
+#endif
+
 auto RDP::render() -> void {
   #if defined(VULKAN)
   if(vulkan.enable && vulkan.render()) {
     const char *msg = vulkan.crashed();
     if(msg) crash(msg);
+    return;
+  }
+  #endif
+
+  #if defined(USE_ANGRYLION)
+  {
+    // Lazy init — need ares to be powered on so RDRAM is allocated
+    if(!angrylion_initialized) {
+      angrylion_init(rdram.ram.data, rdram.ram.size, rsp.dmem.data);
+      angrylion_initialized = true;
+    }
+
+    // Build DP_STATUS from ares flags
+    u32 dp_status = 0;
+    if(command.source) dp_status |= 0x001;  // XBUS_DMA (DMEM mode)
+    if(command.freeze) dp_status |= 0x002;
+    if(command.flush)  dp_status |= 0x004;
+
+    // Let angrylion process the command list
+    u32 new_current = angrylion_process(
+      (u32)command.start, (u32)command.end,
+      (u32)command.current, dp_status
+    );
+    command.current = new_current;
+
+    // Handle sync_full interrupt
+    if(angrylion_sync_full_pending) {
+      angrylion_sync_full_pending = false;
+      mi.raise(MI::IRQ::DP);
+      command.bufferBusy = 0;
+      command.pipeBusy = 0;
+      command.startGclk = 0;
+    }
     return;
   }
   #endif

@@ -7,6 +7,10 @@ local := true
 lto := true
 flags += -I. -I.. -I../ares -I../thirdparty -DMIA_LIBRARY
 
+# angrylion RDP integration
+angrylion.src := ../../angrylion-rdp-plus/src/core
+flags += -DUSE_ANGRYLION -I$(angrylion.src) -I../angrylion
+
 nall.path := ../nall
 include $(nall.path)/GNUmakefile
 
@@ -45,7 +49,27 @@ $(object.path)/web-ui.o: main.cpp
 # Filter out nall-main.o (provides its own main()) since web-ui has its own entry point
 nall.objects.filtered := $(filter-out $(object.path)/nall-main.o,$(nall.objects))
 
-all.objects := $(libco.objects) $(sljit.objects) $(libchdr.objects) $(tzxfile.objects) $(nall.objects.filtered) $(ruby.objects) $(ares.objects) $(mia.objects) $(web-ui.objects)
+# angrylion RDP objects (unity build: n64video.c #includes rdp.c and vi.c)
+angrylion.objects := $(object.path)/alp-n64video.o
+angrylion.objects += $(object.path)/alp-bridge.o $(object.path)/alp-parallel.o $(object.path)/alp-msg.o
+
+$(object.path)/alp-n64video.o: $(angrylion.src)/n64video.c
+	$(info Compiling angrylion n64video.c ...)
+	@$(compiler) -std=c11 -I$(angrylion.src) -I../angrylion $(flags.deps) -c $< $(call obj,$@)
+
+$(object.path)/alp-bridge.o: ../angrylion/angrylion_bridge.c
+	$(info Compiling angrylion bridge ...)
+	@$(compiler) -std=c11 -I$(angrylion.src) -I../angrylion $(flags.deps) -c $< $(call obj,$@)
+
+$(object.path)/alp-parallel.o: ../angrylion/parallel_stub.c
+	$(info Compiling angrylion parallel stub ...)
+	@$(compiler) -std=c11 -I$(angrylion.src) -I../angrylion $(flags.deps) -c $< $(call obj,$@)
+
+$(object.path)/alp-msg.o: ../angrylion/msg_stub.c
+	$(info Compiling angrylion msg stub ...)
+	@$(compiler) -std=c11 -I$(angrylion.src) -I../angrylion $(flags.deps) -c $< $(call obj,$@)
+
+all.objects := $(libco.objects) $(sljit.objects) $(libchdr.objects) $(tzxfile.objects) $(nall.objects.filtered) $(ruby.objects) $(ares.objects) $(mia.objects) $(web-ui.objects) $(angrylion.objects)
 all.options := $(libco.options) $(sljit.options) $(libchdr.options) $(tzxfile.options) $(nall.options) $(ruby.options) $(ares.options) $(mia.options) $(options)
 
 ifeq ($(wasm32),true)
