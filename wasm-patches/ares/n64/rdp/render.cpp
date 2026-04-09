@@ -154,8 +154,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
       return (a << 24) | (i << 16) | (i << 8) | i;
     }
     if(td.format == 2) {
-      // CI8: look up in TLUT (palette) — entries are 8 bytes apart in TMEM
-      u32 tlutAddr = 0x800 + texel * 8;
+      // CI8: look up in TLUT (palette)
+      u32 tlutAddr = 0x800 + texel * 2;
       u16 color = tmem[tlutAddr & 0xfff] << 8 | tmem[(tlutAddr + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -172,8 +172,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
     offset &= 0xfff;
     u8 texel = (s & 1) ? (tmem[offset] & 0xf) : (tmem[offset] >> 4);
     if(td.format == 2) {
-      // CI4: palette lookup — each palette has 16 entries * 8 bytes = 128 bytes
-      u32 palBase = 0x800 + (u32)td.palette * 128 + texel * 8;
+      // CI4: palette lookup
+      u32 palBase = 0x800 + (u32)td.palette * 32 + texel * 2;
       u16 color = tmem[palBase & 0xfff] << 8 | tmem[(palBase + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -707,7 +707,7 @@ auto RDP::textureRectangleFlip() -> void {
   }
 }
 
-// Triangle rasterization with Z-buffer and blender support
+// Triangle rasterization (simplified scanline approach)
 auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   // Convert 11.2 fixed-point Y coordinates
   s32 yh = (s32)(s16)edge.y.hi >> 2;
@@ -754,16 +754,7 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   s32 dtde = ((s32)(s16)texture.t.e.i << 16) | (u16)texture.t.e.f;
   s32 dwde = ((s32)(s16)texture.w.e.i << 16) | (u16)texture.w.e.f;
 
-  // Z-buffer depth (16.16 fixed-point)
-  s32 zval = 0, dzdx_val = 0, dzde_val = 0;
-  if(zbuffer_) {
-    zval     = ((s32)(s16)zbuffer.d.i << 16) | (u16)zbuffer.d.f;
-    dzdx_val = ((s32)(s16)zbuffer.x.i << 16) | (u16)zbuffer.x.f;
-    dzde_val = ((s32)(s16)zbuffer.e.i << 16) | (u16)zbuffer.e.f;
-  }
-
   u32 tileIdx = edge.tile;
-  u32 fbWidth = set.color.width + 1;
 
   // Rasterize scanlines
   for(s32 y = yh; y < yl; y++) {
@@ -789,30 +780,8 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
 
     s32 cr = sr, cg = sg, cb = sb, ca = sa;
     s32 cs = ts, ct = tt, cw = tw;
-    s32 cz = zval;
 
     for(s32 x = x0; x < x1; x++) {
-      // ── Z-buffer test ──
-      if(zbuffer_ && other.zCompare && set.mask.dramAddress) {
-        u16 pixelZ;
-        if(other.zSource) {
-          pixelZ = (u16)primitiveDepth.z;  // flat Z from SetPrimitiveDepth
-        } else {
-          pixelZ = (u16)((u32)cz >> 16);   // per-pixel interpolated Z (upper 16 bits)
-        }
-        u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
-        u16 storedZ = rdram.ram.read<Half>(zAddr);
-        // N64 Z: lower value = closer. Skip pixel if it's behind what's already drawn.
-        if(pixelZ > storedZ) {
-          // Fail depth test — skip this pixel but still step interpolants
-          if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
-          if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
-          cz += dzdx_val;
-          continue;
-        }
-      }
-
-      // ── Shade ──
       u8 shR, shG, shB, shA;
       if(shade_) {
         shR = std::clamp(cr >> 16, 0, 255);
@@ -826,11 +795,12 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         shA = primitive.alpha;
       }
 
-      // ── Texture ──
       u8 texR = 255, texG = 255, texB = 255, texA = 255;
       if(texture_) {
-        s32 si = cs >> 21;
-        s32 ti = ct >> 21;
+        // Convert 16.16 texture coords to integer texel coordinates
+        // S and T are in 10.5 format internally (upper 16 bits are 11.5)
+        s32 si = cs >> 16;
+        s32 ti = ct >> 16;
         u32 texel = fetchTexel(tileIdx, si, ti);
         texR = (texel >> 16) & 0xff;
         texG = (texel >>  8) & 0xff;
@@ -838,86 +808,18 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         texA = (texel >> 24) & 0xff;
       }
 
-      // ── Color combiner ──
       u32 combined = colorCombine(0, texR, texG, texB, texA, shR, shG, shB, shA);
-      u8 pixR = (combined >> 16) & 0xff;
-      u8 pixG = (combined >>  8) & 0xff;
-      u8 pixB = (combined >>  0) & 0xff;
-      u8 pixA = (combined >> 24) & 0xff;
-
-      // ── Blender ──
-      // Implements: out = (P * A + M * B) / (A + B)
-      // P/M selected by blend1a/blend2a, A/B selected by blend1b/blend2b
-      if(other.forceBlend || (pixA < 255 && pixA > 0)) {
-        // Read framebuffer (memory color)
-        u32 memColor = readPixel(x, y);
-        u8 memR = (memColor >> 16) & 0xff;
-        u8 memG = (memColor >>  8) & 0xff;
-        u8 memB = (memColor >>  0) & 0xff;
-        u8 memA = 255;
-
-        // Select P (pixel-in color) — blend1a[0]
-        u8 pR, pG, pB;
-        switch((u32)other.blend1a[0]) {
-          case 0: pR = pixR; pG = pixG; pB = pixB; break;  // combined
-          case 1: pR = memR; pG = memG; pB = memB; break;  // memory
-          case 2: pR = blend.red; pG = blend.green; pB = blend.blue; break;
-          default: pR = fog.red; pG = fog.green; pB = fog.blue; break;  // fog
-        }
-
-        // Select A (alpha source) — blend1b[0]
-        u32 aVal;
-        switch((u32)other.blend1b[0]) {
-          case 0: aVal = pixA; break;       // combined alpha
-          case 1: aVal = fog.alpha; break;   // fog alpha
-          case 2: aVal = shA; break;         // shade alpha
-          default: aVal = 0; break;
-        }
-
-        // Select M (memory-in color) — blend2a[0]
-        u8 mR, mG, mB;
-        switch((u32)other.blend2a[0]) {
-          case 0: mR = pixR; mG = pixG; mB = pixB; break;
-          case 1: mR = memR; mG = memG; mB = memB; break;
-          case 2: mR = blend.red; mG = blend.green; mB = blend.blue; break;
-          default: mR = fog.red; mG = fog.green; mB = fog.blue; break;
-        }
-
-        // Select B (beta source) — blend2b[0]
-        u32 bVal;
-        switch((u32)other.blend2b[0]) {
-          case 0: bVal = 255 - aVal; break;   // 1 - A
-          case 1: bVal = memA; break;          // memory alpha
-          case 2: bVal = 255; break;           // 1.0
-          default: bVal = 0; break;
-        }
-
-        // Blend: (P * A + M * B) / (A + B)
-        u32 denom = aVal + bVal;
-        if(denom > 0) {
-          pixR = std::clamp((s32)(pR * aVal + mR * bVal) / (s32)denom, 0, 255);
-          pixG = std::clamp((s32)(pG * aVal + mG * bVal) / (s32)denom, 0, 255);
-          pixB = std::clamp((s32)(pB * aVal + mB * bVal) / (s32)denom, 0, 255);
-        }
-        pixA = 255;  // blended pixel is fully opaque in framebuffer
+      u8 a = combined >> 24;
+      if(a > 0) {
+        writePixel(x, y, combined & 0xffffff);
       }
 
-      // ── Write pixel ──
-      if(pixA > 0) {
-        writePixel(x, y, (pixR << 16) | (pixG << 8) | pixB);
-
-        // ── Z-buffer update ──
-        if(zbuffer_ && other.zUpdate && set.mask.dramAddress) {
-          u16 pixelZ = other.zSource ? (u16)primitiveDepth.z : (u16)((u32)cz >> 16);
-          u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
-          rdram.ram.write<Half>(zAddr, pixelZ);
-        }
+      if(shade_) {
+        cr += drdx; cg += dgdx; cb += dbdx; ca += dadx;
       }
-
-      // ── Step interpolants per X ──
-      if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
-      if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
-      if(zbuffer_) { cz += dzdx_val; }
+      if(texture_) {
+        cs += dsdx; ct += dtdx; cw += dwdx;
+      }
     }
 
     // Step edges
@@ -932,10 +834,6 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
     // Step texture along edge
     if(texture_) {
       ts += dsde; tt += dtde; tw += dwde;
-    }
-    // Step Z along edge
-    if(zbuffer_) {
-      zval += dzde_val;
     }
   }
 }
@@ -1038,18 +936,17 @@ auto RDP::loadTile() -> void {
 
 auto RDP::loadTLUT() -> void {
   auto& td = tiles[tlut.index];
-  u32 tmemBase = (u32)td.address * 8;  // tile's TMEM address (in upper half)
+  u32 tmemAddr = (u32)td.address * 8;
   u32 dramAddr = set.texture.dramAddress;
   u32 count = ((tlut.s.hi >> 2) - (tlut.s.lo >> 2) + 1);
 
-  // TLUT entries are 16-bit, stored at the tile descriptor's TMEM address
-  // On real hardware TLUT always targets upper TMEM (0x800+), enforced by tile setup
+  // TLUT entries are 16-bit, stored in upper half of TMEM (0x800-0xFFF)
   for(u32 i = 0; i < count && i < 256; i++) {
     u16 entry = rdram.ram.read<Half>(dramAddr + i * 2);
-    // Each TLUT entry occupies 8 bytes in TMEM (quadruplicated), but we store compactly
-    u32 dst = tmemBase + i * 8;
-    tmem[(dst + 0) & 0xfff] = entry >> 8;
-    tmem[(dst + 1) & 0xfff] = entry & 0xff;
+    u32 dst = tmemAddr + i * 2;
+    // TLUT goes to upper TMEM
+    tmem[(0x800 + i * 2) & 0xfff] = entry >> 8;
+    tmem[(0x800 + i * 2 + 1) & 0xfff] = entry & 0xff;
   }
 }
 
