@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ares - N64 Emulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    header {
+      padding: 16px 24px;
+      text-align: center;
+      width: 100%;
+      background: #16213e;
+      border-bottom: 2px solid #0f3460;
+    }
+
+    header h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: #e94560;
+      letter-spacing: 2px;
+    }
+
+    header p {
+      font-size: 13px;
+      color: #888;
+      margin-top: 4px;
+    }
+
+    #canvas-container {
+      margin-top: 24px;
+      border: 3px solid #0f3460;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+      box-shadow: 0 0 30px rgba(233, 69, 96, 0.15);
+    }
+
+    canvas#canvas {
+      display: block;
+      width: 640px;
+      height: 480px;
+      image-rendering: pixelated;
+    }
+
+    #status-bar {
+      margin-top: 12px;
+      padding: 8px 20px;
+      background: #16213e;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #aaa;
+      min-width: 640px;
+      text-align: center;
+    }
+
+    #status-bar.loading { color: #f0a500; }
+    #status-bar.ready   { color: #4ecca3; }
+    #status-bar.error   { color: #e94560; }
+
+    #controls {
+      margin-top: 16px;
+      display: flex;
+      gap: 12px;
+    }
+
+    button {
+      padding: 8px 20px;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      background: #16213e;
+      color: #e0e0e0;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    button:hover {
+      background: #0f3460;
+      border-color: #e94560;
+    }
+
+    #output {
+      margin-top: 16px;
+      width: 640px;
+      max-height: 160px;
+      overflow-y: auto;
+      background: #0d1117;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 12px;
+      color: #8b949e;
+      white-space: pre-wrap;
+    }
+
+    footer {
+      margin-top: auto;
+      padding: 16px;
+      font-size: 12px;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>ARES</h1>
+    <p>N64 Emulator &mdash; WebAssembly Build</p>
+  </header>
+
+  <div id="canvas-container">
+    <canvas id="canvas" width="640" height="480" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  </div>
+
+  <div id="status-bar" class="loading">Initializing...</div>
+
+  <div id="controls">
+    <label id="btn-load" style="padding:8px 20px;border:1px solid #0f3460;border-radius:6px;background:#16213e;color:#e0e0e0;font-size:14px;cursor:pointer;transition:background 0.2s,border-color 0.2s;">
+      Load ROM
+      <input type="file" id="rom-input" accept=".z64,.n64,.v64,.rom" style="display:none">
+    </label>
+    <button id="btn-reset">Reset</button>
+    <button id="btn-screenshot">Screenshot</button>
+    <button id="btn-fullscreen">Fullscreen</button>
+  </div>
+
+  <div style="position:relative;width:640px;">
+    <button id="btn-copy" style="position:absolute;top:4px;right:4px;padding:2px 8px;font-size:11px;z-index:1;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
+    <div id="output"></div>
+  </div>
+
+  <footer>
+    ares &mdash; Multi-System Emulator
+  </footer>
+
+  <script>
+    const statusBar = document.getElementById('status-bar');
+    const output = document.getElementById('output');
+
+    function log(msg) {
+      const ts = new Date().toLocaleTimeString();
+      output.textContent += `[${ts}] ${msg}\n`;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function setStatus(text, cls) {
+      statusBar.textContent = text;
+      statusBar.className = cls || '';
+    }
+
+    // Emscripten Module configuration
+    var Module = {
+      canvas: document.getElementById('canvas'),
+
+      print: function(text) {
+        log(text);
+        console.log(text);
+      },
+
+      printErr: function(text) {
+        log('[ERR] ' + text);
+        console.error(text);
+      },
+
+      onRuntimeInitialized: function() {
+        log('WASM runtime initialized');
+        setStatus('Running', 'ready');
+      },
+
+      onAbort: function(what) {
+        setStatus('Emulator aborted: ' + what, 'error');
+        log('[ABORT] ' + what);
+      },
+
+      locateFile: function(path) {
+        return path;
+      }
+    };
+
+    // Fullscreen
+    document.getElementById('btn-fullscreen').addEventListener('click', function() {
+      const canvas = document.getElementById('canvas');
+      if (canvas.requestFullscreen) canvas.requestFullscreen();
+      else if (canvas.webkitRequestFullscreen) canvas.webkitRequestFullscreen();
+      canvas.focus();
+    });
+
+    // Reset
+    document.getElementById('btn-reset').addEventListener('click', function() {
+      if (Module._resetEmulator) {
+        Module._resetEmulator();
+        log('Emulator reset');
+      }
+    });
+
+    // ROM file upload
+    document.getElementById('rom-input').addEventListener('change', function(e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      log('Loading ROM: ' + file.name + ' (' + file.size + ' bytes)');
+      setStatus('Loading ROM...', 'loading');
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        var data = new Uint8Array(ev.target.result);
+        // Write ROM to emscripten FS, then let C++ read it
+        try {
+          Module.FS.writeFile('/rom.z64', data);
+          Module._loadROM(0, 0);  // signal to load from /rom.z64
+          log('ROM sent to emulator: ' + file.name);
+        } catch(e) {
+          log('[ERR] ' + e.message);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // Copy log
+    document.getElementById('btn-copy').addEventListener('click', function() {
+      navigator.clipboard.writeText(output.textContent).then(function() {
+        document.getElementById('btn-copy').textContent = 'Copied!';
+        setTimeout(function() { document.getElementById('btn-copy').textContent = 'Copy'; }, 1000);
+      });
+    });
+
+    // Screenshot — saves with timestamp
+    document.getElementById('btn-screenshot').addEventListener('click', function() {
+      var canvas = document.getElementById('canvas');
+      var now = new Date();
+      var ts = now.getFullYear() + '-' +
+        String(now.getMonth()+1).padStart(2,'0') + '-' +
+        String(now.getDate()).padStart(2,'0') + '_' +
+        String(now.getHours()).padStart(2,'0') + '-' +
+        String(now.getMinutes()).padStart(2,'0') + '-' +
+        String(now.getSeconds()).padStart(2,'0');
+      var link = document.createElement('a');
+      link.download = 'ares_' + ts + '.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      log('Screenshot saved: ' + link.download);
+    });
+
+    // Keyboard: focus canvas on click
+    document.getElementById('canvas').addEventListener('click', function() {
+      this.focus();
+    });
+
+    setStatus('Loading emulator...', 'loading');
+  </script>
+
+  <script>
+    // Cache-bust the emscripten JS
+    var s = document.createElement('script');
+    s.src = 'ares.js?v=' + Date.now();
+    s.async = true;
+    document.body.appendChild(s);
+  </script>
+
+</body>
+</html>

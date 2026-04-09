@@ -1,0 +1,31 @@
+# Build output
+build/
+build_wasm/
+
+# Emscripten SDK (install via install.bat)
+emsdk/
+
+# Node modules
+web/node_modules/
+web/package-lock.json
+
+# Built WASM artifacts (rebuilt by build-run.bat)
+web/ares.js
+web/ares.wasm
+web/ares.data
+web/ares-data.js
+
+# ROMs (not redistributable)
+*.z64
+*.n64
+*.v64
+*.rom
+!wasm-patches/**
+
+# Screenshots
+screenshots/*.png
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp

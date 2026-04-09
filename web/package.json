@@ -1,0 +1,13 @@
+{
+  "name": "ares-wasm-web",
+  "version": "1.0.0",
+  "description": "Web frontend for ares N64 emulator (WASM build)",
+  "private": true,
+  "scripts": {
+    "start": "http-server . -p 8080 -c-1 --cors -o index.html",
+    "dev": "http-server . -p 8080 -c-1 --cors -o index.html"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+}
