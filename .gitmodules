@@ -1,3 +1,7 @@
 [submodule "ares"]
 	path = ares
-	url = https://github.com/ares-emulator/ares.git
+	url = https://github.com/HailToDodongo/ares-wasm.git
+	branch = wasm
+[submodule "parallel-rdp"]
+	path = parallel-rdp
+	url = https://github.com/Themaister/parallel-rdp-standalone.git

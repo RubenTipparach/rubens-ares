@@ -154,8 +154,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
       return (a << 24) | (i << 16) | (i << 8) | i;
     }
     if(td.format == 2) {
-      // CI8: look up in TLUT (palette)
-      u32 tlutAddr = 0x800 + texel * 2;
+      // CI8: look up in TLUT (palette) — entries are 8 bytes apart in TMEM
+      u32 tlutAddr = 0x800 + texel * 8;
       u16 color = tmem[tlutAddr & 0xfff] << 8 | tmem[(tlutAddr + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -172,8 +172,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
     offset &= 0xfff;
     u8 texel = (s & 1) ? (tmem[offset] & 0xf) : (tmem[offset] >> 4);
     if(td.format == 2) {
-      // CI4: palette lookup
-      u32 palBase = 0x800 + (u32)td.palette * 32 + texel * 2;
+      // CI4: palette lookup — each palette has 16 entries * 8 bytes = 128 bytes
+      u32 palBase = 0x800 + (u32)td.palette * 128 + texel * 8;
       u16 color = tmem[palBase & 0xfff] << 8 | tmem[(palBase + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -500,46 +500,53 @@ auto RDP::colorCombine(u32 cycle, u8 texR, u8 texG, u8 texB, u8 texA,
   if(other.cycleType == 3) return set.fill.color;  // fill mode
   if(other.cycleType == 2) return (texA << 24) | (texR << 16) | (texG << 8) | texB;  // copy mode
 
-  // Color input selectors for (A - B) * C + D
-  // A (sub A): 4-bit selector
-  auto getSubA_RGB = [&](u32 sel) -> s32 {
+  // Per-channel color arrays: [R, G, B]
+  u8 sh[3]   = {shR, shG, shB};
+  u8 tex[3]  = {texR, texG, texB};
+  u8 prim[3] = {(u8)(u32)primitive.red, (u8)(u32)primitive.green, (u8)(u32)primitive.blue};
+  u8 env[3]  = {(u8)(u32)environment.red, (u8)(u32)environment.green, (u8)(u32)environment.blue};
+  u8 keyCenter[3] = {(u8)(u32)key.r.center, (u8)(u32)key.g.center, (u8)(u32)key.b.center};
+  u8 keyScale[3]  = {(u8)(u32)key.r.scale, (u8)(u32)key.g.scale, (u8)(u32)key.b.scale};
+
+  // A (sub A): 4-bit selector, parameterized by channel
+  auto getSubA_RGB = [&](u32 sel, u32 ch) -> s32 {
     switch(sel) {
-      case 0: return shR;  // combined (use shade for cycle 0)
-      case 1: return texR;
-      case 2: return texR;  // tex1 (same as tex0 for now)
-      case 3: return primitive.red;
-      case 4: return shR;
-      case 5: return environment.red;
-      case 6: return 255;
-      case 7: return 0;  // noise
+      case 0: return sh[ch];    // combined (use shade for cycle 0)
+      case 1: return tex[ch];
+      case 2: return tex[ch];   // tex1 (same as tex0 for now)
+      case 3: return prim[ch];
+      case 4: return sh[ch];
+      case 5: return env[ch];
+      case 6: return 255;       // 1.0
+      case 7: return 0;         // noise (TODO: LFSR)
       default: return 0;
     }
   };
   // B (sub B): 4-bit selector
-  auto getSubB_RGB = [&](u32 sel) -> s32 {
+  auto getSubB_RGB = [&](u32 sel, u32 ch) -> s32 {
     switch(sel) {
-      case 0: return shR;
-      case 1: return texR;
-      case 2: return texR;
-      case 3: return primitive.red;
-      case 4: return shR;
-      case 5: return environment.red;
-      case 6: return (s32)key.r.center;
-      case 7: return 0;  // k4
+      case 0: return sh[ch];
+      case 1: return tex[ch];
+      case 2: return tex[ch];
+      case 3: return prim[ch];
+      case 4: return sh[ch];
+      case 5: return env[ch];
+      case 6: return (s32)keyCenter[ch];
+      case 7: return 0;         // k4
       default: return 0;
     }
   };
-  // C (multiply): 5-bit selector
-  auto getMul_RGB = [&](u32 sel) -> s32 {
+  // C (multiply): 5-bit selector — cases 7+ are channel-independent (alpha/LOD sources)
+  auto getMul_RGB = [&](u32 sel, u32 ch) -> s32 {
     switch(sel) {
-      case 0: return shR;
-      case 1: return texR;
-      case 2: return texR;
-      case 3: return primitive.red;
-      case 4: return shR;
-      case 5: return environment.red;
-      case 6: return (s32)key.r.scale;  // key scale
-      case 7: return shA;  // combined alpha
+      case 0: return sh[ch];
+      case 1: return tex[ch];
+      case 2: return tex[ch];
+      case 3: return prim[ch];
+      case 4: return sh[ch];
+      case 5: return env[ch];
+      case 6: return (s32)keyScale[ch];
+      case 7: return shA;       // combined alpha
       case 8: return texA;
       case 9: return texA;
       case 10: return primitive.alpha;
@@ -547,25 +554,25 @@ auto RDP::colorCombine(u32 cycle, u8 texR, u8 texG, u8 texB, u8 texA,
       case 12: return environment.alpha;
       case 13: return primitive.fraction;  // LOD fraction
       case 14: return primitive.fraction;  // prim LOD
-      case 15: return 0;  // k5
+      case 15: return 0;        // k5
       default: return 0;
     }
   };
   // D (add): 3-bit selector
-  auto getAdd_RGB = [&](u32 sel) -> s32 {
+  auto getAdd_RGB = [&](u32 sel, u32 ch) -> s32 {
     switch(sel) {
-      case 0: return shR;
-      case 1: return texR;
-      case 2: return texR;
-      case 3: return primitive.red;
-      case 4: return shR;
-      case 5: return environment.red;
+      case 0: return sh[ch];
+      case 1: return tex[ch];
+      case 2: return tex[ch];
+      case 3: return prim[ch];
+      case 4: return sh[ch];
+      case 5: return env[ch];
       case 6: return 255;
       default: return 0;
     }
   };
 
-  // Alpha: (A - B) * C + D with 3-bit selectors
+  // Alpha: (A - B) * C + D with 3-bit selectors (channel-independent)
   auto getSubA_A = [&](u32 sel) -> s32 {
     switch(sel) { case 0: return shA; case 1: return texA; case 2: return texA;
       case 3: return primitive.alpha; case 4: return shA; case 5: return environment.alpha;
@@ -587,43 +594,19 @@ auto RDP::colorCombine(u32 cycle, u8 texR, u8 texG, u8 texB, u8 texA,
       case 6: return 255; default: return 0; }
   };
 
-  // Helper to run combiner for one color channel
   auto combineChannel = [](s32 a, s32 b, s32 c, s32 d) -> s32 {
     return std::clamp(((a - b) * c) / 256 + d, 0, 255);
   };
 
-  // Run for RGB — use R representatives, then substitute G and B
   u32 sbaC = combine.sba.color[cycle];
   u32 sbbC = combine.sbb.color[cycle];
   u32 mulC = combine.mul.color[cycle];
   u32 addC = combine.add.color[cycle];
 
-  // Get inputs for R channel
-  s32 aR = getSubA_RGB(sbaC);
-  s32 bR = getSubB_RGB(sbbC);
-  s32 cR = getMul_RGB(mulC);
-  s32 dR = getAdd_RGB(addC);
-  s32 outR = combineChannel(aR, bR, cR, dR);
-
-  // For G and B, swap the channel references
-  // This is a simplification — proper impl would parameterize by channel
-  auto swapToG = [&](s32 val) -> s32 {
-    if(val == (s32)shR) return (s32)shG;
-    if(val == (s32)texR) return (s32)texG;
-    if(val == (s32)primitive.red) return (s32)primitive.green;
-    if(val == (s32)environment.red) return (s32)environment.green;
-    return val;
-  };
-  auto swapToB = [&](s32 val) -> s32 {
-    if(val == (s32)shR) return (s32)shB;
-    if(val == (s32)texR) return (s32)texB;
-    if(val == (s32)primitive.red) return (s32)primitive.blue;
-    if(val == (s32)environment.red) return (s32)environment.blue;
-    return val;
-  };
-
-  s32 outG = combineChannel(swapToG(aR), swapToG(bR), swapToG(cR), swapToG(dR));
-  s32 outB = combineChannel(swapToB(aR), swapToB(bR), swapToB(cR), swapToB(dR));
+  // Evaluate each RGB channel independently using the same selectors
+  s32 outR = combineChannel(getSubA_RGB(sbaC, 0), getSubB_RGB(sbbC, 0), getMul_RGB(mulC, 0), getAdd_RGB(addC, 0));
+  s32 outG = combineChannel(getSubA_RGB(sbaC, 1), getSubB_RGB(sbbC, 1), getMul_RGB(mulC, 1), getAdd_RGB(addC, 1));
+  s32 outB = combineChannel(getSubA_RGB(sbaC, 2), getSubB_RGB(sbbC, 2), getMul_RGB(mulC, 2), getAdd_RGB(addC, 2));
 
   // Alpha
   u32 sbaA = combine.sba.alpha[cycle];
@@ -642,16 +625,16 @@ auto RDP::textureRectangle() -> void {
   u32 xhi = rectangle.x.lo >> 2;
   u32 yhi = rectangle.y.lo >> 2;
 
-  // S and T are in 10.5 fixed-point, dsdx/dtdy are in 5.10 fixed-point
-  s32 s0 = ((s16)rectangle.s.i << 5) | (rectangle.s.f >> 11);
-  s32 t0 = ((s16)rectangle.t.i << 5) | (rectangle.t.f >> 11);
-  s32 dsdx = (s16)rectangle.s.f;
-  s32 dtdy = (s16)rectangle.t.f;
+  // S and T coordinates are s.10.5 (16 bits), DsDx/DtDy are s.5.10 (16 bits)
+  // Convert both to a common 10.10 fixed-point format for accumulation
+  s32 s0 = (s32)(s16)rectangle.s.i << 5;   // s.10.5 -> s.10.10
+  s32 t0 = (s32)(s16)rectangle.t.i << 5;   // s.10.5 -> s.10.10
+  s32 dsdx = (s32)(s16)rectangle.s.f;      // s.5.10 (already 10 frac bits)
+  s32 dtdy = (s32)(s16)rectangle.t.f;      // s.5.10
 
-  // In copy mode, dsdx is typically 4.0 (= 1 texel per pixel in 10.5)
+  // In copy mode, dsdx is typically 4.0 (= 1 texel per pixel)
   if(other.cycleType == 2) {
-    // Copy mode: 1:1 texel to pixel
-    if(dsdx == 0) dsdx = 1 << 10;
+    if(dsdx == 0) dsdx = 1 << 10;  // 1.0 in s.5.10
     if(dtdy == 0) dtdy = 1 << 10;
   }
 
@@ -661,8 +644,8 @@ auto RDP::textureRectangle() -> void {
   for(u32 y = ylo; y < yhi; y++) {
     s32 s = s0;
     for(u32 x = xlo; x < xhi; x++) {
-      s32 ss = s >> 5;
-      s32 tt = t >> 5;
+      s32 ss = s >> 10;  // s.10.10 -> integer texel
+      s32 tt = t >> 10;
       u32 texel = fetchTexel(tileIdx, ss, tt);
 
       if(other.cycleType == 2) {
@@ -682,10 +665,49 @@ auto RDP::textureRectangle() -> void {
 }
 
 auto RDP::textureRectangleFlip() -> void {
-  textureRectangle();  // Simplified: same as textureRectangle for now
+  u32 xlo = rectangle.x.hi >> 2;
+  u32 ylo = rectangle.y.hi >> 2;
+  u32 xhi = rectangle.x.lo >> 2;
+  u32 yhi = rectangle.y.lo >> 2;
+
+  // Same fixed-point conversion as textureRectangle
+  s32 s0 = (s32)(s16)rectangle.s.i << 5;   // s.10.5 -> s.10.10
+  s32 t0 = (s32)(s16)rectangle.t.i << 5;   // s.10.5 -> s.10.10
+  // Flip: DsDx becomes DtDx, DtDy becomes DsDy
+  s32 dtdx = (s32)(s16)rectangle.s.f;      // s.5.10 — originally dsdx, now steps T along X
+  s32 dsdy = (s32)(s16)rectangle.t.f;      // s.5.10 — originally dtdy, now steps S along Y
+
+  if(other.cycleType == 2) {
+    if(dtdx == 0) dtdx = 1 << 10;
+    if(dsdy == 0) dsdy = 1 << 10;
+  }
+
+  u32 tileIdx = rectangle.tile;
+  s32 s = s0;
+
+  for(u32 y = ylo; y < yhi; y++) {
+    s32 t = t0;
+    for(u32 x = xlo; x < xhi; x++) {
+      s32 ss = s >> 10;
+      s32 tt = t >> 10;
+      u32 texel = fetchTexel(tileIdx, ss, tt);
+
+      if(other.cycleType == 2) {
+        u8 a = texel >> 24;
+        if(a > 0) writePixel(x, y, texel & 0xffffff);
+      } else {
+        u32 combined = colorCombine(0, texel >> 16 & 0xff, texel >> 8 & 0xff, texel & 0xff, texel >> 24,
+                                     primitive.red, primitive.green, primitive.blue, primitive.alpha);
+        u8 a = combined >> 24;
+        if(a > 0) writePixel(x, y, combined & 0xffffff);
+      }
+      t += dtdx;  // T steps along X
+    }
+    s += dsdy;  // S steps along Y
+  }
 }
 
-// Triangle rasterization (simplified scanline approach)
+// Triangle rasterization with Z-buffer and blender support
 auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   // Convert 11.2 fixed-point Y coordinates
   s32 yh = (s32)(s16)edge.y.hi >> 2;
@@ -732,7 +754,16 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   s32 dtde = ((s32)(s16)texture.t.e.i << 16) | (u16)texture.t.e.f;
   s32 dwde = ((s32)(s16)texture.w.e.i << 16) | (u16)texture.w.e.f;
 
+  // Z-buffer depth (16.16 fixed-point)
+  s32 zval = 0, dzdx_val = 0, dzde_val = 0;
+  if(zbuffer_) {
+    zval     = ((s32)(s16)zbuffer.d.i << 16) | (u16)zbuffer.d.f;
+    dzdx_val = ((s32)(s16)zbuffer.x.i << 16) | (u16)zbuffer.x.f;
+    dzde_val = ((s32)(s16)zbuffer.e.i << 16) | (u16)zbuffer.e.f;
+  }
+
   u32 tileIdx = edge.tile;
+  u32 fbWidth = set.color.width + 1;
 
   // Rasterize scanlines
   for(s32 y = yh; y < yl; y++) {
@@ -758,8 +789,30 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
 
     s32 cr = sr, cg = sg, cb = sb, ca = sa;
     s32 cs = ts, ct = tt, cw = tw;
+    s32 cz = zval;
 
     for(s32 x = x0; x < x1; x++) {
+      // ── Z-buffer test ──
+      if(zbuffer_ && other.zCompare && set.mask.dramAddress) {
+        u16 pixelZ;
+        if(other.zSource) {
+          pixelZ = (u16)primitiveDepth.z;  // flat Z from SetPrimitiveDepth
+        } else {
+          pixelZ = (u16)((u32)cz >> 16);   // per-pixel interpolated Z (upper 16 bits)
+        }
+        u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
+        u16 storedZ = rdram.ram.read<Half>(zAddr);
+        // N64 Z: lower value = closer. Skip pixel if it's behind what's already drawn.
+        if(pixelZ > storedZ) {
+          // Fail depth test — skip this pixel but still step interpolants
+          if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
+          if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
+          cz += dzdx_val;
+          continue;
+        }
+      }
+
+      // ── Shade ──
       u8 shR, shG, shB, shA;
       if(shade_) {
         shR = std::clamp(cr >> 16, 0, 255);
@@ -773,12 +826,11 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         shA = primitive.alpha;
       }
 
+      // ── Texture ──
       u8 texR = 255, texG = 255, texB = 255, texA = 255;
       if(texture_) {
-        // Convert 16.16 texture coords to integer texel coordinates
-        // S and T are in 10.5 format internally (upper 16 bits are 11.5)
-        s32 si = cs >> 16;
-        s32 ti = ct >> 16;
+        s32 si = cs >> 21;
+        s32 ti = ct >> 21;
         u32 texel = fetchTexel(tileIdx, si, ti);
         texR = (texel >> 16) & 0xff;
         texG = (texel >>  8) & 0xff;
@@ -786,18 +838,86 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         texA = (texel >> 24) & 0xff;
       }
 
+      // ── Color combiner ──
       u32 combined = colorCombine(0, texR, texG, texB, texA, shR, shG, shB, shA);
-      u8 a = combined >> 24;
-      if(a > 0) {
-        writePixel(x, y, combined & 0xffffff);
+      u8 pixR = (combined >> 16) & 0xff;
+      u8 pixG = (combined >>  8) & 0xff;
+      u8 pixB = (combined >>  0) & 0xff;
+      u8 pixA = (combined >> 24) & 0xff;
+
+      // ── Blender ──
+      // Implements: out = (P * A + M * B) / (A + B)
+      // P/M selected by blend1a/blend2a, A/B selected by blend1b/blend2b
+      if(other.forceBlend || (pixA < 255 && pixA > 0)) {
+        // Read framebuffer (memory color)
+        u32 memColor = readPixel(x, y);
+        u8 memR = (memColor >> 16) & 0xff;
+        u8 memG = (memColor >>  8) & 0xff;
+        u8 memB = (memColor >>  0) & 0xff;
+        u8 memA = 255;
+
+        // Select P (pixel-in color) — blend1a[0]
+        u8 pR, pG, pB;
+        switch((u32)other.blend1a[0]) {
+          case 0: pR = pixR; pG = pixG; pB = pixB; break;  // combined
+          case 1: pR = memR; pG = memG; pB = memB; break;  // memory
+          case 2: pR = blend.red; pG = blend.green; pB = blend.blue; break;
+          default: pR = fog.red; pG = fog.green; pB = fog.blue; break;  // fog
+        }
+
+        // Select A (alpha source) — blend1b[0]
+        u32 aVal;
+        switch((u32)other.blend1b[0]) {
+          case 0: aVal = pixA; break;       // combined alpha
+          case 1: aVal = fog.alpha; break;   // fog alpha
+          case 2: aVal = shA; break;         // shade alpha
+          default: aVal = 0; break;
+        }
+
+        // Select M (memory-in color) — blend2a[0]
+        u8 mR, mG, mB;
+        switch((u32)other.blend2a[0]) {
+          case 0: mR = pixR; mG = pixG; mB = pixB; break;
+          case 1: mR = memR; mG = memG; mB = memB; break;
+          case 2: mR = blend.red; mG = blend.green; mB = blend.blue; break;
+          default: mR = fog.red; mG = fog.green; mB = fog.blue; break;
+        }
+
+        // Select B (beta source) — blend2b[0]
+        u32 bVal;
+        switch((u32)other.blend2b[0]) {
+          case 0: bVal = 255 - aVal; break;   // 1 - A
+          case 1: bVal = memA; break;          // memory alpha
+          case 2: bVal = 255; break;           // 1.0
+          default: bVal = 0; break;
+        }
+
+        // Blend: (P * A + M * B) / (A + B)
+        u32 denom = aVal + bVal;
+        if(denom > 0) {
+          pixR = std::clamp((s32)(pR * aVal + mR * bVal) / (s32)denom, 0, 255);
+          pixG = std::clamp((s32)(pG * aVal + mG * bVal) / (s32)denom, 0, 255);
+          pixB = std::clamp((s32)(pB * aVal + mB * bVal) / (s32)denom, 0, 255);
+        }
+        pixA = 255;  // blended pixel is fully opaque in framebuffer
       }
 
-      if(shade_) {
-        cr += drdx; cg += dgdx; cb += dbdx; ca += dadx;
+      // ── Write pixel ──
+      if(pixA > 0) {
+        writePixel(x, y, (pixR << 16) | (pixG << 8) | pixB);
+
+        // ── Z-buffer update ──
+        if(zbuffer_ && other.zUpdate && set.mask.dramAddress) {
+          u16 pixelZ = other.zSource ? (u16)primitiveDepth.z : (u16)((u32)cz >> 16);
+          u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
+          rdram.ram.write<Half>(zAddr, pixelZ);
+        }
       }
-      if(texture_) {
-        cs += dsdx; ct += dtdx; cw += dwdx;
-      }
+
+      // ── Step interpolants per X ──
+      if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
+      if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
+      if(zbuffer_) { cz += dzdx_val; }
     }
 
     // Step edges
@@ -812,6 +932,10 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
     // Step texture along edge
     if(texture_) {
       ts += dsde; tt += dtde; tw += dwde;
+    }
+    // Step Z along edge
+    if(zbuffer_) {
+      zval += dzde_val;
     }
   }
 }
@@ -872,10 +996,11 @@ auto RDP::loadBlock() -> void {
   auto& td = tiles[load_.block.index];
   u32 tmemAddr = (u32)td.address * 8;
   u32 dramAddr = set.texture.dramAddress;
-  u32 count = load_.block.s.hi + 1;  // Number of 64-bit words
-  u32 texelSize = 1 << (u32)set.texture.size;  // bytes per texel
+  u32 count = (u32)load_.block.s.hi - (u32)load_.block.s.lo + 1;  // number of texels
+  // size field: 0=4-bit, 1=8-bit, 2=16-bit, 3=32-bit → bits per texel = 4 << size
+  u32 bitsPerTexel = 4 << (u32)set.texture.size;
 
-  u32 bytes = count * texelSize;
+  u32 bytes = (count * bitsPerTexel + 7) / 8;
   if(bytes > 4096) bytes = 4096;
 
   for(u32 i = 0; i < bytes; i++) {
@@ -887,7 +1012,10 @@ auto RDP::loadTile() -> void {
   auto& td = tiles[load_.tile.index];
   u32 tmemAddr = (u32)td.address * 8;
   u32 dramAddr = set.texture.dramAddress;
-  u32 texelSize = 1 << (u32)set.texture.size;
+  // size field: 0=4-bit, 1=8-bit, 2=16-bit, 3=32-bit
+  u32 bitsPerTexel = 4 << (u32)set.texture.size;
+  u32 bytesPerTexel = bitsPerTexel / 8;
+  if(bytesPerTexel == 0) bytesPerTexel = 1;  // 4-bit: handle as 1 byte per 2 texels
   u32 texWidth = set.texture.width + 1;
 
   u32 sl = load_.tile.s.hi >> 2;
@@ -895,13 +1023,13 @@ auto RDP::loadTile() -> void {
   u32 sh = load_.tile.s.lo >> 2;
   u32 th = load_.tile.t.lo >> 2;
 
-  u32 line = td.line ? (u32)td.line * 8 : (sh - sl + 1) * texelSize;
+  u32 line = td.line ? (u32)td.line * 8 : (sh - sl + 1) * bytesPerTexel;
 
   for(u32 t = tl; t <= th; t++) {
     for(u32 s = sl; s <= sh; s++) {
-      u32 srcAddr = dramAddr + (t * texWidth + s) * texelSize;
-      u32 dstAddr = tmemAddr + (t - tl) * line + (s - sl) * texelSize;
-      for(u32 b = 0; b < texelSize; b++) {
+      u32 srcAddr = dramAddr + (t * texWidth + s) * bytesPerTexel;
+      u32 dstAddr = tmemAddr + (t - tl) * line + (s - sl) * bytesPerTexel;
+      for(u32 b = 0; b < bytesPerTexel; b++) {
         tmem[(dstAddr + b) & 0xfff] = rdram.ram.read<Byte>(srcAddr + b);
       }
     }
@@ -910,17 +1038,18 @@ auto RDP::loadTile() -> void {
 
 auto RDP::loadTLUT() -> void {
   auto& td = tiles[tlut.index];
-  u32 tmemAddr = (u32)td.address * 8;
+  u32 tmemBase = (u32)td.address * 8;  // tile's TMEM address (in upper half)
   u32 dramAddr = set.texture.dramAddress;
   u32 count = ((tlut.s.hi >> 2) - (tlut.s.lo >> 2) + 1);
 
-  // TLUT entries are 16-bit, stored in upper half of TMEM (0x800-0xFFF)
+  // TLUT entries are 16-bit, stored at the tile descriptor's TMEM address
+  // On real hardware TLUT always targets upper TMEM (0x800+), enforced by tile setup
   for(u32 i = 0; i < count && i < 256; i++) {
     u16 entry = rdram.ram.read<Half>(dramAddr + i * 2);
-    u32 dst = tmemAddr + i * 2;
-    // TLUT goes to upper TMEM
-    tmem[(0x800 + i * 2) & 0xfff] = entry >> 8;
-    tmem[(0x800 + i * 2 + 1) & 0xfff] = entry & 0xff;
+    // Each TLUT entry occupies 8 bytes in TMEM (quadruplicated), but we store compactly
+    u32 dst = tmemBase + i * 8;
+    tmem[(dst + 0) & 0xfff] = entry >> 8;
+    tmem[(dst + 1) & 0xfff] = entry & 0xff;
   }
 }
 

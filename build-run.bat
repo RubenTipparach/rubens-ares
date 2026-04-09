@@ -14,7 +14,7 @@ set "BUILD_DIR=%~dp0build"
 set "PATCHES_DIR=%~dp0wasm-patches"
 
 :: ── Step 1: Check ares submodule ──
-if not exist "%ARES_DIR%\ares\ares.hpp" (
+if not exist "%ARES_DIR%\nall\GNUmakefile" (
     echo [BUILD] Initializing ares submodule...
     git submodule update --init --recursive
     if !errorlevel! neq 0 (
@@ -102,6 +102,9 @@ cd /d "%~dp0"
 if not exist "%BUILD_DIR%\web-ui\GNUmakefile" (
     echo [BUILD] Copying ares source to build directory...
     if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%" 2>nul
+
+    :: Submodule is the wasm branch of ares — flat structure with GNUmakefiles
+    :: Copy everything needed for the N64 build
     xcopy /s /y /q /i "%ARES_DIR%\ares" "%BUILD_DIR%\ares" >nul
     xcopy /s /y /q /i "%ARES_DIR%\nall" "%BUILD_DIR%\nall" >nul
     xcopy /s /y /q /i "%ARES_DIR%\libco" "%BUILD_DIR%\libco" >nul
@@ -109,6 +112,7 @@ if not exist "%BUILD_DIR%\web-ui\GNUmakefile" (
     xcopy /s /y /q /i "%ARES_DIR%\hiro" "%BUILD_DIR%\hiro" >nul
     xcopy /s /y /q /i "%ARES_DIR%\mia" "%BUILD_DIR%\mia" >nul
     xcopy /s /y /q /i "%ARES_DIR%\thirdparty" "%BUILD_DIR%\thirdparty" >nul
+    xcopy /s /y /q /i "%ARES_DIR%\scripts" "%BUILD_DIR%\scripts" >nul 2>nul
 
     :: Create web-ui directory
     mkdir "%BUILD_DIR%\web-ui" 2>nul
@@ -124,8 +128,14 @@ if exist "%PATCHES_DIR%" (
 )
 
 :: Copy PIF firmware ROMs
+:: PIF ROMs are at ares/ares/System/Nintendo 64/ in the submodule
 copy /y "%ARES_DIR%\ares\System\Nintendo 64\pif.ntsc.rom" "%BUILD_DIR%\web-ui\pif.ntsc.rom" >nul 2>nul
 copy /y "%ARES_DIR%\ares\System\Nintendo 64\pif.pal.rom" "%BUILD_DIR%\web-ui\pif.pal.rom" >nul 2>nul
+:: Also check one level up in case structure differs
+if not exist "%BUILD_DIR%\web-ui\pif.ntsc.rom" (
+    copy /y "%ARES_DIR%\System\Nintendo 64\pif.ntsc.rom" "%BUILD_DIR%\web-ui\pif.ntsc.rom" >nul 2>nul
+    copy /y "%ARES_DIR%\System\Nintendo 64\pif.pal.rom" "%BUILD_DIR%\web-ui\pif.pal.rom" >nul 2>nul
+)
 
 :: ── Step 6: Build ares with Emscripten ──
 cd /d "%BUILD_DIR%\web-ui"

@@ -47,15 +47,18 @@ This is a browser-based N64 emulator built from the [ares emulator](https://gith
 The original ares RDP had all rendering functions as empty stubs — it relied entirely on the Vulkan-based parallel-RDP for GPU rendering. We implemented:
 
 - **fillRectangle()** — solid color fills to RDRAM framebuffer
-- **textureRectangle()** — 2D textured quads (menus, HUD, text)
+- **textureRectangle() / textureRectangleFlip()** — 2D textured quads (menus, HUD, text, rotated sprites)
 - **renderTriangle()** — scanline triangle rasterizer with:
   - Edge walking (hi/md/lo edges with 16.16 fixed-point slopes)
   - Gouraud shading (per-vertex RGBA color interpolation)
   - Texture mapping (S/T/W coordinate interpolation, TMEM texel fetch)
+  - Z-buffer depth testing and updates (via mask image)
+  - Blender: `(P*A + M*B)/(A+B)` with selector-based inputs (transparency, fog, memory blend)
   - Scissor clipping
 - **colorCombine()** — N64 color combiner implementing `(A - B) * C + D` per channel
-  - Supports texture, shade, primitive, environment color inputs
-  - Fill mode, copy mode, 1-cycle and 2-cycle modes
+  - Per-channel evaluation (R/G/B independently, not swapped from R)
+  - Supports texture, shade, primitive, environment, key color inputs
+  - Fill mode, copy mode, 1-cycle mode
 - **TMEM management** — loadBlock(), loadTile(), loadTLUT()
 - **Tile descriptors** — 8 tile slots with format, size, wrapping, mirroring, clamping
 - **Texel fetching** — RGBA16, RGBA32, CI4, CI8, IA4, IA8, I4, I8 formats with palette lookup
@@ -451,6 +454,47 @@ static void mainLoop() {
 
 This gives ~200-300k instructions per browser frame, producing roughly 1 N64 frame per 2 browser frames (~15 emulated fps).
 
+## RDP Software Renderer Changelog (2026-04-09)
+
+Before screenshot: `screenshots/ares_2026-04-08_20-55-40.png` — garbled blue stripes, broken rendering.
+
+All changes in `wasm-patches/ares/n64/rdp/render.cpp`. Reference: `parallel-rdp/` submodule (Themaister/parallel-rdp-standalone).
+
+### Fixes Applied
+
+| # | What | What Changed |
+|---|------|-------------|
+| 1 | **Color Combiner** | Replaced broken `swapToG/swapToB` value-comparison hack with proper per-channel array evaluation. Each selector (`getSubA_RGB`, `getSubB_RGB`, `getMul_RGB`, `getAdd_RGB`) now takes a `ch` parameter (0=R, 1=G, 2=B) indexing into `sh[ch]`, `tex[ch]`, `prim[ch]`, `env[ch]`, `keyCenter[ch]`, `keyScale[ch]` arrays. |
+| 2 | **Texture Rectangle S/T** | Fixed fixed-point conversion: S/T coords now `(s16)val << 5` (s.10.5 to s.10.10), DsDx/DtDy left as s.5.10. Texel extraction uses `>> 10` (was `>> 5`). Removed DsDx bit contamination (`\| rectangle.s.f >> 11`). |
+| 3 | **loadBlock/loadTile** | Byte count now uses `(4 << size)` bits-per-texel with `(count * bitsPerTexel + 7) / 8`. Texel count uses `SH - SL + 1`. Same fix applied to `loadTile`. |
+| 4 | **textureRectangleFlip** | Now properly swaps S/T stepping axes: T steps along X (`dtdx`), S steps along Y (`dsdy`). Was just calling `textureRectangle()`. |
+| 5 | **Triangle Texture Coords** | Changed `cs >> 16` to `cs >> 21` — accounts for 5 sub-texel fraction bits in s.10.5 packed inside s.15.16 container. |
+| 6 | **Z-Buffer** (new feature) | Full per-pixel depth testing in `renderTriangle()`. Reads/writes 16-bit Z via mask image (`set.mask.dramAddress`). Supports `other.zCompare`, `other.zUpdate`, `other.zSource` (per-pixel interpolated or flat `primitiveDepth.z`). Interpolants still step correctly on depth-test failure. |
+| 7 | **Blender** (new feature) | Selector-based `(P*A + M*B)/(A+B)` in `renderTriangle()`. P/M sources: combined, memory, blend color, fog color (`blend1a`/`blend2a`). A sources: combined alpha, fog alpha, shade alpha, 0 (`blend1b`). B sources: 1-A, memory alpha, 1.0, 0 (`blend2b`). Reads framebuffer via `readPixel()`. Activated by `forceBlend` or semi-transparent alpha. |
+| 8 | **TLUT Address** | `loadTLUT()` now uses tile descriptor's TMEM address instead of hardcoded 0x800. Entries stored with 8-byte stride (matching real N64 TMEM quadruplication). CI8 lookup uses `texel * 8`, CI4 uses `palette * 128 + texel * 8`. |
+
+### Still TODO
+- No perspective-correct texture mapping (W division)
+- No anti-aliasing / coverage
+- No color/alpha dithering
+- Texture filtering is nearest-neighbor only (no bilinear)
+- No LOD / mipmapping
+- No 2-cycle combiner mode (only cycle 0 used)
+- No noise generator in combiner (returns 0)
+- Copy mode DsDx fallback may not match all games (Bug 9 — minor)
+- Audio still not output (no Web Audio integration)
+
+### parallel-rdp Reference Map
+
+| Our Software RDP | parallel-rdp Reference |
+|---|---|
+| `render.cpp:colorCombine()` | `parallel-rdp/parallel-rdp/shaders/combiner.h` |
+| `render.cpp:fillRectangle()` | `parallel-rdp/parallel-rdp/rdp_device.cpp:op_fill_rectangle()` |
+| `render.cpp:textureRectangle()` | `parallel-rdp/parallel-rdp/rdp_device.cpp:op_tex_rect()` |
+| `render.cpp:loadBlock()` | `parallel-rdp/parallel-rdp/rdp_device.cpp:op_load_block()` |
+| `render.cpp:renderTriangle()` | `parallel-rdp/parallel-rdp/rdp_device.cpp` triangle setup + `shaders/` rasterization |
+| `render.cpp:fetchTexel()` | `parallel-rdp/parallel-rdp/shaders/texture.h` |
+
 ## Known Limitations
 
 ### Performance
@@ -459,15 +503,12 @@ This gives ~200-300k instructions per browser frame, producing roughly 1 N64 fra
 - Single-threaded (no Web Workers yet)
 
 ### RDP Software Renderer
-- Color combiner is simplified (channel swap approximation for G/B)
 - No perspective-correct texture mapping (W division)
-- No Z-buffer implementation (depth testing)
-- No anti-aliasing
+- No anti-aliasing / coverage calculation
 - No color/alpha dithering
-- No blender implementation (alpha blending with framebuffer)
-- No coverage calculation
 - Texture filtering is nearest-neighbor only (no bilinear)
 - No LOD (level of detail) / mipmapping
+- No 2-cycle combiner mode
 
 ### Audio
 - Audio samples are drained but not output (no Web Audio integration yet)
@@ -497,5 +538,6 @@ ares-wasm/
     web-ui/               # WASM frontend source
   build_wasm/             # git worktree (wasm branch + patches)
   build-run.bat           # One-click build script
+  parallel-rdp/           # Reference: Themaister's parallel-rdp (submodule)
   screenshots/            # Screenshot output directory
 ```
