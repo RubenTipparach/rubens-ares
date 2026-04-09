@@ -154,8 +154,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
       return (a << 24) | (i << 16) | (i << 8) | i;
     }
     if(td.format == 2) {
-      // CI8: look up in TLUT (palette)
-      u32 tlutAddr = 0x800 + texel * 2;
+      // CI8: look up in TLUT (palette) — entries are 8 bytes apart in TMEM
+      u32 tlutAddr = 0x800 + texel * 8;
       u16 color = tmem[tlutAddr & 0xfff] << 8 | tmem[(tlutAddr + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -172,8 +172,8 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
     offset &= 0xfff;
     u8 texel = (s & 1) ? (tmem[offset] & 0xf) : (tmem[offset] >> 4);
     if(td.format == 2) {
-      // CI4: palette lookup
-      u32 palBase = 0x800 + (u32)td.palette * 32 + texel * 2;
+      // CI4: palette lookup — each palette has 16 entries * 8 bytes = 128 bytes
+      u32 palBase = 0x800 + (u32)td.palette * 128 + texel * 8;
       u16 color = tmem[palBase & 0xfff] << 8 | tmem[(palBase + 1) & 0xfff];
       u8 r = (color >> 11 & 0x1f) << 3;
       u8 g = (color >>  6 & 0x1f) << 3;
@@ -838,10 +838,72 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         texA = (texel >> 24) & 0xff;
       }
 
+      // ── Color combiner ──
       u32 combined = colorCombine(0, texR, texG, texB, texA, shR, shG, shB, shA);
-      u8 a = combined >> 24;
-      if(a > 0) {
-        writePixel(x, y, combined & 0xffffff);
+      u8 pixR = (combined >> 16) & 0xff;
+      u8 pixG = (combined >>  8) & 0xff;
+      u8 pixB = (combined >>  0) & 0xff;
+      u8 pixA = (combined >> 24) & 0xff;
+
+      // ── Blender ──
+      // Implements: out = (P * A + M * B) / (A + B)
+      if(other.forceBlend || (pixA < 255 && pixA > 0)) {
+        // Read framebuffer (memory color)
+        u32 memColor = readPixel(x, y);
+        u8 memR = (memColor >> 16) & 0xff;
+        u8 memG = (memColor >>  8) & 0xff;
+        u8 memB = (memColor >>  0) & 0xff;
+        u8 memA = 255;
+
+        // Select P (pixel-in color) — blend1a[0]
+        u8 pR, pG, pB;
+        switch((u32)other.blend1a[0]) {
+          case 0: pR = pixR; pG = pixG; pB = pixB; break;  // combined
+          case 1: pR = memR; pG = memG; pB = memB; break;  // memory
+          case 2: pR = blend.red; pG = blend.green; pB = blend.blue; break;
+          default: pR = fog.red; pG = fog.green; pB = fog.blue; break;  // fog
+        }
+
+        // Select A (alpha source) — blend1b[0]
+        u32 aVal;
+        switch((u32)other.blend1b[0]) {
+          case 0: aVal = pixA; break;       // combined alpha
+          case 1: aVal = fog.alpha; break;   // fog alpha
+          case 2: aVal = shA; break;         // shade alpha
+          default: aVal = 0; break;
+        }
+
+        // Select M (memory-in color) — blend2a[0]
+        u8 mR, mG, mB;
+        switch((u32)other.blend2a[0]) {
+          case 0: mR = pixR; mG = pixG; mB = pixB; break;
+          case 1: mR = memR; mG = memG; mB = memB; break;
+          case 2: mR = blend.red; mG = blend.green; mB = blend.blue; break;
+          default: mR = fog.red; mG = fog.green; mB = fog.blue; break;
+        }
+
+        // Select B (beta source) — blend2b[0]
+        u32 bVal;
+        switch((u32)other.blend2b[0]) {
+          case 0: bVal = 255 - aVal; break;   // 1 - A
+          case 1: bVal = memA; break;          // memory alpha
+          case 2: bVal = 255; break;           // 1.0
+          default: bVal = 0; break;
+        }
+
+        // Blend: (P * A + M * B) / (A + B)
+        u32 denom = aVal + bVal;
+        if(denom > 0) {
+          pixR = std::clamp((s32)(pR * aVal + mR * bVal) / (s32)denom, 0, 255);
+          pixG = std::clamp((s32)(pG * aVal + mG * bVal) / (s32)denom, 0, 255);
+          pixB = std::clamp((s32)(pB * aVal + mB * bVal) / (s32)denom, 0, 255);
+        }
+        pixA = 255;  // blended pixel is fully opaque in framebuffer
+      }
+
+      // ── Write pixel ──
+      if(pixA > 0) {
+        writePixel(x, y, (pixR << 16) | (pixG << 8) | pixB);
 
         // ── Z-buffer update ──
         if(zbuffer_ && other.zUpdate && set.mask.dramAddress) {
@@ -979,13 +1041,14 @@ auto RDP::loadTLUT() -> void {
   u32 dramAddr = set.texture.dramAddress;
   u32 count = ((tlut.s.hi >> 2) - (tlut.s.lo >> 2) + 1);
 
-  // TLUT entries are 16-bit, stored in upper half of TMEM (0x800-0xFFF)
+  // TLUT entries are 16-bit, stored at the tile descriptor's TMEM address
+  // On real hardware TLUT always targets upper TMEM (0x800+), enforced by tile setup
   for(u32 i = 0; i < count && i < 256; i++) {
     u16 entry = rdram.ram.read<Half>(dramAddr + i * 2);
-    u32 dst = tmemAddr + i * 2;
-    // TLUT goes to upper TMEM
-    tmem[(0x800 + i * 2) & 0xfff] = entry >> 8;
-    tmem[(0x800 + i * 2 + 1) & 0xfff] = entry & 0xff;
+    // Each TLUT entry occupies 8 bytes in TMEM (quadruplicated), but we store compactly
+    u32 dst = tmemAddr + i * 8;
+    tmem[(dst + 0) & 0xfff] = entry >> 8;
+    tmem[(dst + 1) & 0xfff] = entry & 0xff;
   }
 }
 
