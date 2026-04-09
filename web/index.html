@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ares - N64 Emulator</title>
+  <script src="coi-serviceworker.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -142,6 +143,14 @@
     <div id="output"></div>
   </div>
 
+  <div id="profile-panel" style="margin-top:12px;width:640px;background:#0d1117;border:1px solid #0f3460;border-radius:6px;padding:10px;font-family:'Cascadia Code','Consolas',monospace;font-size:12px;color:#8b949e;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+      <span style="color:#4ecca3;font-weight:bold;">Profile (per browser frame avg)</span>
+      <button id="btn-copy-profile" style="padding:2px 8px;font-size:11px;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
+    </div>
+    <pre id="profile-data" style="margin:0;white-space:pre;">Waiting for data...</pre>
+  </div>
+
   <footer>
     ares &mdash; Multi-System Emulator
   </footer>
@@ -160,6 +169,30 @@
       statusBar.textContent = text;
       statusBar.className = cls || '';
     }
+
+    // Profile display
+    var lastProfile = '';
+    function updateProfile(p) {
+      var lines = [
+        'CPU + RSP:      ' + p.cpuRspMs.padStart(8) + ' ms/frame',
+        'RDP (angrylion):' + p.rdpMs.padStart(8) + ' ms/frame',
+        'WebGPU render:  ' + p.renderMs.padStart(8) + ' ms/frame',
+        'Total:          ' + p.totalMs.padStart(8) + ' ms/frame',
+        '─────────────────────────────────',
+        'MIPS instr/sec: ' + (p.instrPerSec + ' M').padStart(9),
+        'N64 FPS:        ' + p.n64Fps.padStart(8),
+        'Browser FPS:    ' + p.browserFps.padStart(8),
+      ];
+      lastProfile = lines.join('\n');
+      document.getElementById('profile-data').textContent = lastProfile;
+    }
+
+    document.getElementById('btn-copy-profile').addEventListener('click', function() {
+      navigator.clipboard.writeText(lastProfile).then(function() {
+        document.getElementById('btn-copy-profile').textContent = 'Copied!';
+        setTimeout(function() { document.getElementById('btn-copy-profile').textContent = 'Copy'; }, 1000);
+      });
+    });
 
     // Emscripten Module configuration
     var Module = {
@@ -187,7 +220,9 @@
 
       locateFile: function(path) {
         return path;
-      }
+      },
+
+      onProfile: updateProfile
     };
 
     // Fullscreen
@@ -215,14 +250,20 @@
       var reader = new FileReader();
       reader.onload = function(ev) {
         var data = new Uint8Array(ev.target.result);
-        // Write ROM to emscripten FS, then let C++ read it
-        try {
-          Module.FS.writeFile('/rom.z64', data);
-          Module._loadROM(0, 0);  // signal to load from /rom.z64
-          log('ROM sent to emulator: ' + file.name);
-        } catch(e) {
-          log('[ERR] ' + e.message);
+        function tryLoad() {
+          if (!Module.calledRun) {
+            setTimeout(tryLoad, 100);
+            return;
+          }
+          try {
+            Module.FS.writeFile('/rom.z64', data);
+            Module._loadROM(0, 0);
+            log('ROM sent to emulator: ' + file.name);
+          } catch(e) {
+            log('[ERR] ' + e.message);
+          }
         }
+        tryLoad();
       };
       reader.readAsArrayBuffer(file);
     });

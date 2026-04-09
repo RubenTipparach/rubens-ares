@@ -51,16 +51,18 @@ void angrylion_init(uint8_t* rdram_ptr, uint32_t rdram_size, uint8_t* dmem_ptr)
     config.gfx.mi_intr_reg = &mi_intr_reg;
     config.gfx.mi_intr_cb = mi_intr_callback;
 
-    // Single-threaded for WASM
-    config.parallel = false;
-    config.num_workers = 1;
+    // Parallel rendering — uses pthreads (Web Workers + SharedArrayBuffer)
+    // Must match -sPTHREAD_POOL_SIZE in GNUmakefile
+    config.parallel = true;
+    config.num_workers = 4;
+    config.busyloop = false;
 
     // Fast VI mode — ares handles its own VI output
     config.vi.mode = VI_MODE_COLOR;
     config.vi.interp = VI_INTERP_NEAREST;
 
-    // High compat — safest for accuracy
-    config.dp.compat = DP_COMPAT_HIGH;
+    // Low compat — less sync overhead, faster
+    config.dp.compat = DP_COMPAT_LOW;
 
     n64video_init(&config);
 }

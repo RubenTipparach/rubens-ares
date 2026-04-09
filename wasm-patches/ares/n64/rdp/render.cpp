@@ -203,7 +203,11 @@ extern "C" {
 static bool angrylion_initialized = false;
 #endif
 
+#include <emscripten.h>
+extern "C" double g_prof_rdp_time;
+
 auto RDP::render() -> void {
+  double _rdp_start = emscripten_get_now();
   #if defined(VULKAN)
   if(vulkan.enable && vulkan.render()) {
     const char *msg = vulkan.crashed();
@@ -241,6 +245,7 @@ auto RDP::render() -> void {
       command.pipeBusy = 0;
       command.startGclk = 0;
     }
+    g_prof_rdp_time += emscripten_get_now() - _rdp_start;
     return;
   }
   #endif
