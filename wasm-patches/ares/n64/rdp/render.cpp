@@ -754,7 +754,16 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   s32 dtde = ((s32)(s16)texture.t.e.i << 16) | (u16)texture.t.e.f;
   s32 dwde = ((s32)(s16)texture.w.e.i << 16) | (u16)texture.w.e.f;
 
+  // Z-buffer depth (16.16 fixed-point)
+  s32 zval = 0, dzdx_val = 0, dzde_val = 0;
+  if(zbuffer_) {
+    zval     = ((s32)(s16)zbuffer.d.i << 16) | (u16)zbuffer.d.f;
+    dzdx_val = ((s32)(s16)zbuffer.x.i << 16) | (u16)zbuffer.x.f;
+    dzde_val = ((s32)(s16)zbuffer.e.i << 16) | (u16)zbuffer.e.f;
+  }
+
   u32 tileIdx = edge.tile;
+  u32 fbWidth = set.color.width + 1;
 
   // Rasterize scanlines
   for(s32 y = yh; y < yl; y++) {
@@ -780,8 +789,29 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
 
     s32 cr = sr, cg = sg, cb = sb, ca = sa;
     s32 cs = ts, ct = tt, cw = tw;
+    s32 cz = zval;
 
     for(s32 x = x0; x < x1; x++) {
+      // ── Z-buffer test ──
+      if(zbuffer_ && other.zCompare && set.mask.dramAddress) {
+        u16 pixelZ;
+        if(other.zSource) {
+          pixelZ = (u16)primitiveDepth.z;  // flat Z from SetPrimitiveDepth
+        } else {
+          pixelZ = (u16)((u32)cz >> 16);   // per-pixel interpolated Z (upper 16 bits)
+        }
+        u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
+        u16 storedZ = rdram.ram.read<Half>(zAddr);
+        // N64 Z: lower value = closer. Skip pixel if it's behind what's already drawn.
+        if(pixelZ > storedZ) {
+          // Fail depth test — skip this pixel but still step interpolants
+          if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
+          if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
+          cz += dzdx_val;
+          continue;
+        }
+      }
+
       u8 shR, shG, shB, shA;
       if(shade_) {
         shR = std::clamp(cr >> 16, 0, 255);
@@ -799,8 +829,8 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
       if(texture_) {
         // Convert 16.16 texture coords to integer texel coordinates
         // S and T are in 10.5 format internally (upper 16 bits are 11.5)
-        s32 si = cs >> 16;
-        s32 ti = ct >> 16;
+        s32 si = cs >> 21;
+        s32 ti = ct >> 21;
         u32 texel = fetchTexel(tileIdx, si, ti);
         texR = (texel >> 16) & 0xff;
         texG = (texel >>  8) & 0xff;
@@ -812,14 +842,19 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
       u8 a = combined >> 24;
       if(a > 0) {
         writePixel(x, y, combined & 0xffffff);
+
+        // ── Z-buffer update ──
+        if(zbuffer_ && other.zUpdate && set.mask.dramAddress) {
+          u16 pixelZ = other.zSource ? (u16)primitiveDepth.z : (u16)((u32)cz >> 16);
+          u32 zAddr = set.mask.dramAddress + ((u32)y * fbWidth + (u32)x) * 2;
+          rdram.ram.write<Half>(zAddr, pixelZ);
+        }
       }
 
-      if(shade_) {
-        cr += drdx; cg += dgdx; cb += dbdx; ca += dadx;
-      }
-      if(texture_) {
-        cs += dsdx; ct += dtdx; cw += dwdx;
-      }
+      // ── Step interpolants per X ──
+      if(shade_)   { cr += drdx; cg += dgdx; cb += dbdx; ca += dadx; }
+      if(texture_) { cs += dsdx; ct += dtdx; cw += dwdx; }
+      if(zbuffer_) { cz += dzdx_val; }
     }
 
     // Step edges
@@ -834,6 +869,10 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
     // Step texture along edge
     if(texture_) {
       ts += dsde; tt += dtde; tw += dwde;
+    }
+    // Step Z along edge
+    if(zbuffer_) {
+      zval += dzde_val;
     }
   }
 }
