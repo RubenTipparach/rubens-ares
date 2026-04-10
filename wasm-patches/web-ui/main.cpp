@@ -414,47 +414,51 @@ static auto loadROMData(const u8* data, u32 size) -> bool {
 static EM_BOOL onKeyDown(int, const EmscriptenKeyboardEvent* e, void*) {
   auto& inp = platform.inputState;
   string key = e->key;
+  EM_ASM({ if(Module.onWasmKey) Module.onWasmKey(UTF8ToString($0), 1); }, (const char*)key);
+
   if(key == "x" || key == "X") inp.a = true;
   if(key == "z" || key == "Z") inp.b = true;
   if(key == "c" || key == "C") inp.z = true;
   if(key == "Enter") inp.start = true;
-  if(key == "ArrowUp") inp.dpadUp = true;
-  if(key == "ArrowDown") inp.dpadDown = true;
-  if(key == "ArrowLeft") inp.dpadLeft = true;
-  if(key == "ArrowRight") inp.dpadRight = true;
-  if(key == "a" || key == "A") inp.l = true;
-  if(key == "s" || key == "S") inp.r = true;
+  if(key == "w" || key == "W") inp.dpadUp = true;
+  if(key == "s" || key == "S") inp.dpadDown = true;
+  if(key == "a" || key == "A") inp.dpadLeft = true;
+  if(key == "d" || key == "D") inp.dpadRight = true;
+  if(key == "q" || key == "Q") inp.l = true;
+  if(key == "e" || key == "E") inp.r = true;
   if(key == "i" || key == "I") inp.cUp = true;
   if(key == "k" || key == "K") inp.cDown = true;
   if(key == "j" || key == "J") inp.cLeft = true;
   if(key == "l" || key == "L") inp.cRight = true;
-  if(key == "w" || key == "W") inp.axisY = 85;
-  if(key == "d" || key == "D") inp.axisX = 85;
-  if(key == "q" || key == "Q") inp.axisX = -85;
-  if(key == "e" || key == "E") inp.axisY = -85;
+  if(key == "ArrowUp") inp.axisY = -32768;
+  if(key == "ArrowDown") inp.axisY = 32767;
+  if(key == "ArrowLeft") inp.axisX = -32768;
+  if(key == "ArrowRight") inp.axisX = 32767;
   return EM_TRUE;
 }
 static EM_BOOL onKeyUp(int, const EmscriptenKeyboardEvent* e, void*) {
   auto& inp = platform.inputState;
   string key = e->key;
+  EM_ASM({ if(Module.onWasmKey) Module.onWasmKey(UTF8ToString($0), 0); }, (const char*)key);
+
   if(key == "x" || key == "X") inp.a = false;
   if(key == "z" || key == "Z") inp.b = false;
   if(key == "c" || key == "C") inp.z = false;
   if(key == "Enter") inp.start = false;
-  if(key == "ArrowUp") inp.dpadUp = false;
-  if(key == "ArrowDown") inp.dpadDown = false;
-  if(key == "ArrowLeft") inp.dpadLeft = false;
-  if(key == "ArrowRight") inp.dpadRight = false;
-  if(key == "a" || key == "A") inp.l = false;
-  if(key == "s" || key == "S") inp.r = false;
+  if(key == "w" || key == "W") inp.dpadUp = false;
+  if(key == "s" || key == "S") inp.dpadDown = false;
+  if(key == "a" || key == "A") inp.dpadLeft = false;
+  if(key == "d" || key == "D") inp.dpadRight = false;
+  if(key == "q" || key == "Q") inp.l = false;
+  if(key == "e" || key == "E") inp.r = false;
   if(key == "i" || key == "I") inp.cUp = false;
   if(key == "k" || key == "K") inp.cDown = false;
   if(key == "j" || key == "J") inp.cLeft = false;
   if(key == "l" || key == "L") inp.cRight = false;
-  if(key == "w" || key == "W") inp.axisY = 0;
-  if(key == "d" || key == "D") inp.axisX = 0;
-  if(key == "q" || key == "Q") inp.axisX = 0;
-  if(key == "e" || key == "E") inp.axisY = 0;
+  if(key == "ArrowUp") inp.axisY = 0;
+  if(key == "ArrowDown") inp.axisY = 0;
+  if(key == "ArrowLeft") inp.axisX = 0;
+  if(key == "ArrowRight") inp.axisX = 0;
   return EM_TRUE;
 }
 

@@ -143,6 +143,58 @@
     <div id="output"></div>
   </div>
 
+  <div id="input-panel" style="position:fixed;right:12px;top:12px;width:220px;background:#0d1117;border:1px solid #0f3460;border-radius:6px;padding:10px;font-family:'Cascadia Code','Consolas',monospace;font-size:10px;color:#8b949e;z-index:10;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+      <span style="color:#f0a500;font-weight:bold;font-size:10px;">N64 Controller</span>
+      <button id="btn-copy-input" style="padding:1px 6px;font-size:9px;border:1px solid #0f3460;border-radius:3px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
+    </div>
+    <!-- L / R bumpers -->
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+      <div id="btn-l" class="ibtn">L [Q]</div>
+      <div id="btn-r" class="ibtn">R [E]</div>
+    </div>
+    <!-- D-Pad (left) | Start (center) | C-buttons (right) -->
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+      <!-- D-Pad -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;width:72px;">
+        <div></div><div id="btn-dup" class="ibtn">W</div><div></div>
+        <div id="btn-dleft" class="ibtn">A</div><div></div><div id="btn-dright" class="ibtn">D</div>
+        <div></div><div id="btn-ddown" class="ibtn">S</div><div></div>
+      </div>
+      <!-- Start -->
+      <div style="display:flex;align-items:center;">
+        <div id="btn-start" class="ibtn" style="font-size:9px;">Start<br>[Enter]</div>
+      </div>
+      <!-- C-buttons -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;width:72px;">
+        <div></div><div id="btn-cup" class="ibtn" style="color:#f0d000;">C↑[I]</div><div></div>
+        <div id="btn-cleft" class="ibtn" style="color:#f0d000;">C←[J]</div><div></div><div id="btn-cright" class="ibtn" style="color:#f0d000;">C→[L]</div>
+        <div></div><div id="btn-cdown" class="ibtn" style="color:#f0d000;">C↓[K]</div><div></div>
+      </div>
+    </div>
+    <!-- A/B/Z row -->
+    <div style="display:flex;justify-content:center;gap:6px;margin-bottom:4px;">
+      <div id="btn-b" class="ibtn" style="color:#4e4;border-color:#4e4;">B [Z]</div>
+      <div id="btn-a" class="ibtn" style="color:#44f;border-color:#44f;">A [X]</div>
+      <div id="btn-z" class="ibtn">Z [C]</div>
+    </div>
+    <!-- Analog stick -->
+    <div style="text-align:center;color:#555;font-size:9px;margin-bottom:2px;">Analog [Arrows]</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;width:72px;margin:0 auto 6px;">
+      <div></div><div id="btn-sup" class="ibtn">&#x2191;</div><div></div>
+      <div id="btn-sleft" class="ibtn">&#x2190;</div><div></div><div id="btn-sright" class="ibtn">&#x2192;</div>
+      <div></div><div id="btn-sdown" class="ibtn">&#x2193;</div><div></div>
+    </div>
+    <pre id="input-log" style="margin:0;max-height:120px;overflow-y:auto;font-size:9px;color:#555;word-break:break-all;white-space:pre-wrap;border-top:1px solid #1a1a2e;padding-top:4px;"></pre>
+  </div>
+  <style>
+    .ibtn {
+      padding:2px 3px;border:1px solid #333;border-radius:3px;background:#1a1a2e;
+      color:#666;text-align:center;font-size:9px;line-height:1.3;
+      transition:all 0.05s;min-width:20px;
+    }
+  </style>
+
   <div id="profile-panel" style="margin-top:12px;width:640px;background:#0d1117;border:1px solid #0f3460;border-radius:6px;padding:10px;font-family:'Cascadia Code','Consolas',monospace;font-size:12px;color:#8b949e;">
     <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
       <span style="color:#4ecca3;font-weight:bold;">Profile (per browser frame avg)</span>
@@ -194,6 +246,78 @@
       });
     });
 
+    // ── Input visualization ──
+    var inputMap = [
+      { key: 'x',          n64: 'A',       id: 'btn-a' },
+      { key: 'z',          n64: 'B',       id: 'btn-b' },
+      { key: 'c',          n64: 'Z',       id: 'btn-z' },
+      { key: 'Enter',      n64: 'Start',   id: 'btn-start' },
+      { key: 'w',           n64: 'D-Up',    id: 'btn-dup' },
+      { key: 's',           n64: 'D-Down',  id: 'btn-ddown' },
+      { key: 'a',           n64: 'D-Left',  id: 'btn-dleft' },
+      { key: 'd',           n64: 'D-Right', id: 'btn-dright' },
+      { key: 'q',          n64: 'L',       id: 'btn-l' },
+      { key: 'e',          n64: 'R',       id: 'btn-r' },
+      { key: 'i',          n64: 'C-Up',    id: 'btn-cup' },
+      { key: 'k',          n64: 'C-Down',  id: 'btn-cdown' },
+      { key: 'j',          n64: 'C-Left',  id: 'btn-cleft' },
+      { key: 'l',          n64: 'C-Right', id: 'btn-cright' },
+      { key: 'ArrowUp',    n64: 'Stick-Up', id: 'btn-sup' },
+      { key: 'ArrowLeft',  n64: 'Stick-L',  id: 'btn-sleft' },
+      { key: 'ArrowRight', n64: 'Stick-R',  id: 'btn-sright' },
+      { key: 'ArrowDown',  n64: 'Stick-Dn', id: 'btn-sdown' },
+    ];
+
+    var inputLogEl = document.getElementById('input-log');
+    var inputLogLines = [];
+    var keyToEntry = {};
+
+    inputMap.forEach(function(m) {
+      var el = document.getElementById(m.id);
+      if (el) keyToEntry[m.key.toLowerCase()] = { el: el, n64: m.n64, origColor: el.style.color || '#666' };
+    });
+
+    function inputLog(msg) {
+      var ts = new Date().toLocaleTimeString([], {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit', fractionalSecondDigits:3});
+      inputLogLines.push('[' + ts + '] ' + msg);
+      if (inputLogLines.length > 50) inputLogLines.shift();
+      inputLogEl.textContent = inputLogLines.join('\n');
+      inputLogEl.scrollTop = inputLogEl.scrollHeight;
+    }
+
+    // JS-side key tracking
+    document.addEventListener('keydown', function(e) {
+      var entry = keyToEntry[e.key.toLowerCase()];
+      if (entry) {
+        entry.el.style.borderColor = '#4ecca3';
+        entry.el.style.background = '#1e3a2e';
+        inputLog('JS down: ' + e.key + ' -> ' + entry.n64);
+      }
+    });
+    document.addEventListener('keyup', function(e) {
+      var entry = keyToEntry[e.key.toLowerCase()];
+      if (entry) {
+        entry.el.style.borderColor = '#333';
+        entry.el.style.background = '#1a1a2e';
+        inputLog('JS up:   ' + e.key + ' -> ' + entry.n64);
+      }
+    });
+
+    // WASM-side key callback (called from C++ via EM_ASM)
+    function onWasmKey(key, down) {
+      var entry = keyToEntry[key.toLowerCase()];
+      if (entry) {
+        inputLog('WASM ' + (down ? 'down' : 'up  ') + ': ' + key + ' -> ' + entry.n64);
+      }
+    }
+
+    document.getElementById('btn-copy-input').addEventListener('click', function() {
+      navigator.clipboard.writeText(inputLogLines.join('\n')).then(function() {
+        document.getElementById('btn-copy-input').textContent = 'Copied!';
+        setTimeout(function() { document.getElementById('btn-copy-input').textContent = 'Copy Log'; }, 1000);
+      });
+    });
+
     // Emscripten Module configuration
     var Module = {
       canvas: document.getElementById('canvas'),
@@ -222,7 +346,8 @@
         return path;
       },
 
-      onProfile: updateProfile
+      onProfile: updateProfile,
+      onWasmKey: onWasmKey
     };
 
     // Fullscreen

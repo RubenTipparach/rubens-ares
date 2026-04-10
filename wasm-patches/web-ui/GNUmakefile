@@ -83,7 +83,7 @@ ifeq ($(wasm32),true)
   all.options += --preload-file pif.ntsc.rom
   all.options += --preload-file pif.pal.rom
   # pthreads for angrylion parallel rendering
-  all.options += -pthread -sPTHREAD_POOL_SIZE=4
+  all.options += -pthread -sPTHREAD_POOL_SIZE=8
   all.options += -sALLOW_BLOCKING_ON_MAIN_THREAD=1
 endif
 

@@ -230,7 +230,7 @@ auto RDP::render() -> void {
     if(command.freeze) dp_status |= 0x002;
     if(command.flush)  dp_status |= 0x004;
 
-    // Let angrylion process the command list
+    // Process RDP commands synchronously
     u32 new_current = angrylion_process(
       (u32)command.start, (u32)command.end,
       (u32)command.current, dp_status
