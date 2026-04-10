@@ -4,7 +4,21 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ares - N64 Emulator</title>
-  <script src="coi-serviceworker.js"></script>
+  <!-- COOP/COEP headers come from server.js directly, no SW needed -->
+  <script>
+    // Auto-unregister any leftover service worker (clean up old coi-serviceworker)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        if (regs.length > 0) {
+          console.log('[cleanup] unregistering ' + regs.length + ' service worker(s)');
+          Promise.all(regs.map(function(r) { return r.unregister(); })).then(function() {
+            console.log('[cleanup] done, reloading');
+            window.location.reload();
+          });
+        }
+      });
+    }
+  </script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -215,18 +229,118 @@
       const ts = new Date().toLocaleTimeString();
       output.textContent += `[${ts}] ${msg}\n`;
       output.scrollTop = output.scrollHeight;
+      // Forward to profile server if connected
+      if (typeof profileWs !== 'undefined' && profileWs && profileWs.readyState === 1) {
+        try { profileWs.send(JSON.stringify({ type: 'log', data: msg })); } catch(e) {}
+      }
     }
+
+    // ── Log the build ID FIRST so we always know what's running ──
+    fetch('/build-info').then(function(r) { return r.json(); }).then(function(info) {
+      log('═══════════════════════════════════════');
+      log('BUILD: ' + info.buildId);
+      log('mtime: ' + info.mtime);
+      log('size:  ' + info.size + ' bytes');
+      log('═══════════════════════════════════════');
+    }).catch(function(e) {
+      log('[build-info] failed: ' + e.message);
+    });
 
     function setStatus(text, cls) {
       statusBar.textContent = text;
       statusBar.className = cls || '';
     }
 
+    // Global error handler — forwards JS errors to the profile server log
+    window.addEventListener('error', function(e) {
+      log('[js-error] ' + (e.message || e.type) + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+      log('[promise-reject] ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+    });
+
+    // ── Auto-load ROM ──
+    function autoLoadROM() {
+      fetch('rom.z64')
+        .then(function(r) {
+          if (!r.ok) { log('[auto-load] no rom.z64 on server'); return; }
+          return r.arrayBuffer();
+        })
+        .then(function(buf) {
+          if (!buf) return;
+          var data = new Uint8Array(buf);
+          log('[auto-load] loaded rom.z64 (' + data.length + ' bytes)');
+          function tryLoad() {
+            if (!Module.calledRun) { setTimeout(tryLoad, 100); return; }
+            try {
+              Module.FS.writeFile('/rom.z64', data);
+              Module._loadROM(0, 0);
+              log('[auto-load] ROM started');
+            } catch(e) {
+              log('[ERR] auto-load: ' + e.message);
+            }
+          }
+          tryLoad();
+        })
+        .catch(function(e) { log('[auto-load] no rom: ' + e.message); });
+    }
+
+    // ── WebSocket connection to profile server ──
+    var profileWs = null;
+    function connectProfileWs() {
+      try {
+        profileWs = new WebSocket('ws://' + window.location.host);
+        profileWs.onopen = function() { log('[ws] connected to profile server'); };
+        profileWs.onmessage = function(ev) {
+          try {
+            var msg = JSON.parse(ev.data);
+            if (msg.type === 'reload') {
+              log('[ws] reload requested by server');
+              // Unregister SW so cached wasm doesn't get served
+              if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.getRegistrations().then(function(regs) {
+                  Promise.all(regs.map(function(r) { return r.unregister(); })).then(function() {
+                    window.location.reload();
+                  });
+                });
+              } else {
+                window.location.reload();
+              }
+            }
+          } catch(e) {}
+        };
+        profileWs.onclose = function() {
+          profileWs = null;
+          // Reconnect after 1s
+          setTimeout(connectProfileWs, 1000);
+        };
+        profileWs.onerror = function() {};
+      } catch(e) {
+        // Server not running — that's fine, manual mode
+      }
+    }
+    connectProfileWs();
+
+    var pageLoadTime = Date.now();
+    function sendProfileToServer(p) {
+      // Add page runtime to the payload so server can verify the page restarted
+      var uptimeSec = Math.round((Date.now() - pageLoadTime) / 1000);
+      p.uptimeSec = uptimeSec;
+      if (profileWs && profileWs.readyState === 1) {
+        profileWs.send(JSON.stringify({ type: 'profile', data: p }));
+        log('[heartbeat] build=' + (p.buildId || '?') + ' uptime=' + uptimeSec + 's n64fps=' + p.n64Fps + ' total=' + p.totalMs + 'ms');
+      } else {
+        log('[heartbeat] ws not connected, sample dropped');
+      }
+    }
+
     // Profile display
     var lastProfile = '';
     function updateProfile(p) {
+      sendProfileToServer(p);
       var lines = [
-        'CPU + RSP:      ' + p.cpuRspMs.padStart(8) + ' ms/frame',
+        'CPU loop:       ' + p.cpuMs.padStart(8) + ' ms/frame',
+        'Sync (subsys):  ' + p.syncMs.padStart(8) + ' ms/frame',
         'RDP (angrylion):' + p.rdpMs.padStart(8) + ' ms/frame',
         'WebGPU render:  ' + p.renderMs.padStart(8) + ' ms/frame',
         'Total:          ' + p.totalMs.padStart(8) + ' ms/frame',
@@ -328,21 +442,26 @@
       },
 
       printErr: function(text) {
-        log('[ERR] ' + text);
+        log('[stderr] ' + text);
         console.error(text);
+      },
+
+      onAbort: function(what) {
+        log('[ABORT] ' + JSON.stringify(what));
+        setStatus('aborted', 'error');
       },
 
       onRuntimeInitialized: function() {
         log('WASM runtime initialized');
         setStatus('Running', 'ready');
-      },
-
-      onAbort: function(what) {
-        setStatus('Emulator aborted: ' + what, 'error');
-        log('[ABORT] ' + what);
+        autoLoadROM();
       },
 
       locateFile: function(path) {
+        // Cache-bust the wasm and data files
+        if (path.endsWith('.wasm') || path.endsWith('.data')) {
+          return path + '?v=' + Date.now();
+        }
         return path;
       },
 

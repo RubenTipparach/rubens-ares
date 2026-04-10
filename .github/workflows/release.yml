@@ -1,0 +1,149 @@
+name: Build and Release WASM
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v0.1.0). Leave empty to upload as artifact only.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Verify emscripten
+        run: emcc --version
+
+      - name: Prepare build directory
+        run: |
+          # Mirror what build.bat does on Windows: copy ares source + apply wasm-patches on top
+          mkdir -p build
+          cp -r ares/ares build/
+          cp -r ares/nall build/
+          cp -r ares/libco build/
+          cp -r ares/ruby build/
+          cp -r ares/hiro build/
+          cp -r ares/mia build/
+          cp -r ares/thirdparty build/
+          [ -d ares/scripts ] && cp -r ares/scripts build/ || true
+          mkdir -p build/web-ui
+          # Apply wasm patches on top (merge contents of wasm-patches/ into build/)
+          cp -a wasm-patches/. build/
+          # Copy PIF ROMs needed by the WASM build
+          cp ares/ares/System/Nintendo\ 64/pif.ntsc.rom build/web-ui/
+          cp ares/ares/System/Nintendo\ 64/pif.pal.rom build/web-ui/
+          # Touch source files so make picks them up (preserving timestamps from cp can confuse make)
+          find build -name '*.cpp' -exec touch {} +
+          find build -name '*.hpp' -exec touch {} +
+          # Empty LICENSE file (build expects it)
+          touch build/LICENSE
+
+      - name: Build WASM
+        working-directory: build/web-ui
+        run: |
+          emmake make -j$(nproc) wasm32=true platform=linux
+
+      - name: Verify build artifacts
+        run: |
+          ls -la build/web-ui/out/
+          test -f build/web-ui/out/ares
+          test -f build/web-ui/out/ares.wasm
+          test -f build/web-ui/out/ares.data
+
+      - name: Stage release files
+        run: |
+          mkdir -p release/ares-wasm
+          # Copy the served files (not generated dev files)
+          cp web/index.html              release/ares-wasm/
+          cp web/profile-server.js       release/ares-wasm/ 2>/dev/null || true
+          cp web/server.js               release/ares-wasm/ 2>/dev/null || true
+          cp web/graphs.html             release/ares-wasm/ 2>/dev/null || true
+          cp web/coi-serviceworker.js    release/ares-wasm/ 2>/dev/null || true
+          cp web/package.json            release/ares-wasm/ 2>/dev/null || true
+          # Copy build outputs
+          cp build/web-ui/out/ares       release/ares-wasm/ares.js
+          cp build/web-ui/out/ares.wasm  release/ares-wasm/ares.wasm
+          cp build/web-ui/out/ares.data  release/ares-wasm/ares.data
+          # Strip dev-only artifacts
+          rm -f release/ares-wasm/profile-data.csv
+          rm -f release/ares-wasm/benchmark-scores.csv
+          rm -f release/ares-wasm/rom.z64
+          # Add a brief README describing what's inside
+          cat > release/ares-wasm/README.md <<'EOF'
+          # ares N64 — WASM + WebGPU build
+
+          Browser-based N64 emulator (ares core compiled to WebAssembly with a software RDP and WebGPU display).
+
+          ## Running locally
+          From this directory:
+          ```
+          node profile-server.js
+          ```
+          Then open http://localhost:3000 in a browser that supports WebGPU
+          (Chrome 113+, Edge 113+, or Firefox Nightly with `dom.webgpu.enabled`).
+
+          To autoload a ROM, place it as `rom.z64` in this folder before starting
+          the server.
+
+          ## Hosting on a static site (itch.io, GitHub Pages, etc.)
+          The host must serve `Cross-Origin-Opener-Policy: same-origin` and
+          `Cross-Origin-Embedder-Policy: require-corp` headers, otherwise
+          SharedArrayBuffer will be unavailable and pthreads will fail.
+          EOF
+          # Also write a build manifest
+          cat > release/ares-wasm/BUILD_INFO.txt <<EOF
+          ares N64 WASM build
+          commit:    ${GITHUB_SHA}
+          ref:       ${GITHUB_REF}
+          built:     $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          wasm size: $(stat -c%s release/ares-wasm/ares.wasm) bytes
+          EOF
+          ls -la release/ares-wasm/
+
+      - name: Create release zip
+        run: |
+          cd release
+          zip -r ares-wasm.zip ares-wasm
+          ls -la ares-wasm.zip
+
+      - name: Upload build artifact (every build)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ares-wasm-${{ github.sha }}
+          path: release/ares-wasm.zip
+          retention-days: 30
+
+      - name: Create GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/ares-wasm.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Create GitHub Release (manual dispatch with tag input)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/ares-wasm.zip
+          tag_name: ${{ github.event.inputs.release_tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true

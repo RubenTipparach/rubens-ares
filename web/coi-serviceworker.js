@@ -49,12 +49,22 @@ if (typeof window !== 'undefined') {
     // Only handle same-origin navigations and subresources
     if (e.request.cache === 'only-if-cached' && e.request.mode !== 'same-origin') return;
 
+    // Clone the request with cache: 'no-store' to bypass HTTP cache
+    const freshRequest = new Request(e.request.url, {
+      method: e.request.method,
+      headers: e.request.headers,
+      mode: e.request.mode === 'navigate' ? 'cors' : e.request.mode,
+      credentials: e.request.credentials,
+      cache: 'no-store',
+      redirect: e.request.redirect,
+    });
+
     e.respondWith(
-      fetch(e.request).then(response => {
-        // Clone response and add COOP/COEP headers
+      fetch(freshRequest).then(response => {
         const headers = new Headers(response.headers);
         headers.set('Cross-Origin-Opener-Policy', 'same-origin');
         headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+        headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
 
         return new Response(response.body, {
           status: response.status,

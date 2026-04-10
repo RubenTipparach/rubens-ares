@@ -2,8 +2,19 @@
 #include <n64/n64.hpp>
 #include <emscripten.h>
 
-// Global profiling counters — incremented from RDP code
-extern "C" double g_prof_rdp_time = 0;
+// Global profiling counters — incremented from RDP/RSP/etc code
+extern "C" double g_prof_rdp_time = 0;       // angrylion render
+extern "C" double g_prof_vi_time = 0;
+extern "C" double g_prof_ai_time = 0;
+extern "C" double g_prof_rsp_time = 0;
+extern "C" double g_prof_rdp_main_time = 0;  // rdp.main() (not render)
+extern "C" double g_prof_pif_time = 0;
+
+// Build identifier — set at compile time. Lets us verify the running wasm
+// matches the latest build via the profile data heartbeat.
+// __DATE__ __TIME__ change every time main.cpp is recompiled.
+static const char* BUILD_ID = __DATE__ " " __TIME__;
+
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
@@ -485,11 +496,21 @@ static void mainLoop() {
   auto& vi  = ares::Nintendo64::vi;
   double deadline = loopStart + 50.0;
 
+  // Batch CPU instructions before synchronizing other subsystems.
+  constexpr u32 SYNC_INTERVAL = 128;
+
   while(emscripten_get_now() < deadline) {
     double batchStart = emscripten_get_now();
-    for(u32 i = 0; i < 4096; i++) {
-      cpu.instruction();
+    double syncAcc = 0;
+    for(u32 i = 0; i < 4096; i += SYNC_INTERVAL) {
+      for(u32 j = 0; j < SYNC_INTERVAL; j++) {
+        cpu.instruction();
+      }
+      double s0 = emscripten_get_now();
       cpu.synchronize();
+      double s1 = emscripten_get_now();
+      syncAcc += (s1 - s0);
+
       if(vi.refreshed) {
         vi.refreshed = false;
         frameCount++;
@@ -497,7 +518,8 @@ static void mainLoop() {
       }
     }
     double batchEnd = emscripten_get_now();
-    prof.cpuTime += (batchEnd - batchStart);  // "emulation" time (CPU+sync combined)
+    prof.cpuTime += (batchEnd - batchStart) - syncAcc;  // CPU only
+    prof.syncTime += syncAcc;                            // sync only
     prof.instrCount += 4096;
   }
 
@@ -514,24 +536,41 @@ static void mainLoop() {
     double sec = (now - prof.lastReport) / 1000.0;
     double loops = prof.loopCount > 0 ? prof.loopCount : 1;
     double rdpTime = g_prof_rdp_time;
-    double cpuRspTime = prof.cpuTime - rdpTime;  // emulation minus RDP = CPU+RSP
+    double viTime = g_prof_vi_time;
+    double aiTime = g_prof_ai_time;
+    double rspTime = g_prof_rsp_time;
+    double rdpMainTime = g_prof_rdp_main_time;
+    double pifTime = g_prof_pif_time;
     g_prof_rdp_time = 0;
+    g_prof_vi_time = 0;
+    g_prof_ai_time = 0;
+    g_prof_rsp_time = 0;
+    g_prof_rdp_main_time = 0;
+    g_prof_pif_time = 0;
     EM_ASM({
       if(Module.onProfile) Module.onProfile({
-        emuMs:       ($0 / $6).toFixed(2),
-        cpuRspMs:    ($8 / $6).toFixed(2),
+        buildId:     UTF8ToString($15),
+        cpuMs:       ($0 / $6).toFixed(2),
+        syncMs:      ($1 / $6).toFixed(2),
         rdpMs:       ($9 / $6).toFixed(2),
         renderMs:    ($2 / $6).toFixed(2),
         totalMs:     ($3 / $6).toFixed(2),
         instrPerSec: (($4 / $7) / 1e6).toFixed(2),
         n64Fps:      ($5 / $7).toFixed(1),
         browserFps:  ($6 / $7).toFixed(1),
+        viMs:        ($10 / $6).toFixed(2),
+        aiMs:        ($11 / $6).toFixed(2),
+        rspMs:       ($12 / $6).toFixed(2),
+        rdpMainMs:   ($13 / $6).toFixed(2),
+        pifMs:       ($14 / $6).toFixed(2),
       });
     },
       prof.cpuTime, prof.syncTime, prof.renderTime, prof.totalTime,
       (double)prof.instrCount, (double)prof.n64Frames,
       (double)prof.loopCount, sec,
-      cpuRspTime, rdpTime
+      0.0, rdpTime,
+      viTime, aiTime, rspTime, rdpMainTime, pifTime,
+      BUILD_ID
     );
 
     prof.cpuTime = prof.syncTime = prof.renderTime = prof.totalTime = 0;
@@ -543,6 +582,10 @@ static void mainLoop() {
 // ── Exported API ────────────��────────────────────────────────
 
 extern "C" {
+  EMSCRIPTEN_KEEPALIVE const char* getBuildId() {
+    return BUILD_ID;
+  }
+
   EMSCRIPTEN_KEEPALIVE void resetEmulator() {
     if(platform.root) {
       platform.root->power(true);
@@ -569,6 +612,13 @@ extern "C" {
         document.getElementById('status-bar').className = 'ready';
       });
     }
+  }
+
+  EMSCRIPTEN_KEEPALIVE void setFrameskip(int skip) {
+    #if defined(USE_ANGRYLION)
+    extern void angrylion_set_frameskip(int);
+    angrylion_set_frameskip(skip);
+    #endif
   }
 }
 
