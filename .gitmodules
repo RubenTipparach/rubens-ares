@@ -5,3 +5,6 @@
 [submodule "parallel-rdp"]
 	path = parallel-rdp
 	url = https://github.com/Themaister/parallel-rdp-standalone.git
+[submodule "angrylion-rdp-plus"]
+	path = angrylion-rdp-plus
+	url = https://github.com/ata4/angrylion-rdp-plus.git

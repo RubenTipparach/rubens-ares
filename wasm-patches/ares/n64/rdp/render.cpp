@@ -196,11 +196,56 @@ auto RDP::fetchTexel(u32 tileIdx, s32 s, s32 t) -> u32 {
 
 // ── Command dispatch ─────────────────────────────────────────
 
+#if defined(USE_ANGRYLION)
+extern "C" {
+  #include "angrylion_bridge.h"
+}
+static bool angrylion_initialized = false;
+#endif
+
+#include <emscripten.h>
+extern "C" double g_prof_rdp_time;
+
 auto RDP::render() -> void {
+  double _rdp_start = emscripten_get_now();
   #if defined(VULKAN)
   if(vulkan.enable && vulkan.render()) {
     const char *msg = vulkan.crashed();
     if(msg) crash(msg);
+    return;
+  }
+  #endif
+
+  #if defined(USE_ANGRYLION)
+  {
+    // Lazy init — need ares to be powered on so RDRAM is allocated
+    if(!angrylion_initialized) {
+      angrylion_init(rdram.ram.data, rdram.ram.size, rsp.dmem.data);
+      angrylion_initialized = true;
+    }
+
+    // Build DP_STATUS from ares flags
+    u32 dp_status = 0;
+    if(command.source) dp_status |= 0x001;  // XBUS_DMA (DMEM mode)
+    if(command.freeze) dp_status |= 0x002;
+    if(command.flush)  dp_status |= 0x004;
+
+    // Process RDP commands synchronously
+    u32 new_current = angrylion_process(
+      (u32)command.start, (u32)command.end,
+      (u32)command.current, dp_status
+    );
+    command.current = new_current;
+
+    // Handle sync_full interrupt
+    if(angrylion_sync_full_pending) {
+      angrylion_sync_full_pending = false;
+      mi.raise(MI::IRQ::DP);
+      command.bufferBusy = 0;
+      command.pipeBusy = 0;
+      command.startGclk = 0;
+    }
+    g_prof_rdp_time += emscripten_get_now() - _rdp_start;
     return;
   }
   #endif
@@ -707,7 +752,7 @@ auto RDP::textureRectangleFlip() -> void {
   }
 }
 
-// Triangle rasterization with Z-buffer and blender support
+// Triangle rasterization (simplified scanline approach)
 auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
   // Convert 11.2 fixed-point Y coordinates
   s32 yh = (s32)(s16)edge.y.hi >> 2;
@@ -812,7 +857,6 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         }
       }
 
-      // ── Shade ──
       u8 shR, shG, shB, shA;
       if(shade_) {
         shR = std::clamp(cr >> 16, 0, 255);
@@ -826,9 +870,10 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
         shA = primitive.alpha;
       }
 
-      // ── Texture ──
       u8 texR = 255, texG = 255, texB = 255, texA = 255;
       if(texture_) {
+        // Convert 16.16 texture coords to integer texel coordinates
+        // S and T are in 10.5 format internally (upper 16 bits are 11.5)
         s32 si = cs >> 21;
         s32 ti = ct >> 21;
         u32 texel = fetchTexel(tileIdx, si, ti);
@@ -847,7 +892,6 @@ auto RDP::renderTriangle(bool shade_, bool texture_, bool zbuffer_) -> void {
 
       // ── Blender ──
       // Implements: out = (P * A + M * B) / (A + B)
-      // P/M selected by blend1a/blend2a, A/B selected by blend1b/blend2b
       if(other.forceBlend || (pixA < 255 && pixA > 0)) {
         // Read framebuffer (memory color)
         u32 memColor = readPixel(x, y);
@@ -1038,7 +1082,7 @@ auto RDP::loadTile() -> void {
 
 auto RDP::loadTLUT() -> void {
   auto& td = tiles[tlut.index];
-  u32 tmemBase = (u32)td.address * 8;  // tile's TMEM address (in upper half)
+  u32 tmemAddr = (u32)td.address * 8;
   u32 dramAddr = set.texture.dramAddress;
   u32 count = ((tlut.s.hi >> 2) - (tlut.s.lo >> 2) + 1);
 
@@ -1047,7 +1091,7 @@ auto RDP::loadTLUT() -> void {
   for(u32 i = 0; i < count && i < 256; i++) {
     u16 entry = rdram.ram.read<Half>(dramAddr + i * 2);
     // Each TLUT entry occupies 8 bytes in TMEM (quadruplicated), but we store compactly
-    u32 dst = tmemBase + i * 8;
+    u32 dst = tmemAddr + i * 8;
     tmem[(dst + 0) & 0xfff] = entry >> 8;
     tmem[(dst + 1) & 0xfff] = entry & 0xff;
   }

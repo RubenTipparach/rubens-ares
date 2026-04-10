@@ -143,9 +143,9 @@ cp out/ares ../web/ares.js
 cp out/ares.wasm ../web/
 cp out/ares.data ../web/
 
-# Serve
+# Serve (with COOP/COEP headers for SharedArrayBuffer/pthreads)
 cd ../web
-npx http-server . -p 3000 -c-1 --cors
+node server.js
 ```
 
 ### Output files
@@ -454,6 +454,90 @@ static void mainLoop() {
 
 This gives ~200-300k instructions per browser frame, producing roughly 1 N64 frame per 2 browser frames (~15 emulated fps).
 
+## angrylion-rdp-plus Integration (2026-04-09)
+
+### Overview
+
+The custom software RDP has been supplemented with [angrylion-rdp-plus](https://github.com/ata4/angrylion-rdp-plus), the gold-standard pixel-perfect N64 RDP software renderer. angrylion is enabled by default via `-DUSE_ANGRYLION` and completely replaces the custom renderer's command processing — ares's VI + WebGPU display pipeline remains unchanged.
+
+### Architecture
+
+```
+[RSP microcode] ──> [DP registers: START/END/CURRENT]
+                          |
+                    [angrylion bridge]
+                          |
+                    [angrylion_process()]
+                          |
+            ┌─────────────┼─────────────┐
+            │             │             │
+       [Worker 0]    [Worker 1]    [Worker N]     ← pthreads via Web Workers
+            │             │             │
+            └─────────────┼─────────────┘
+                          |
+                    [RDRAM framebuffer]
+                          |
+                    [ares VI] ──> [WebGPU]
+```
+
+### How It Works
+
+1. **Lazy init**: First call to `RDP::render()` initializes angrylion with pointers to ares's RDRAM (`rdram.ram.data`) and RSP DMEM (`rsp.dmem.data`)
+2. **Register mapping**: ares's DP register values (`command.start/end/current/source`) are copied into a static register array that angrylion reads via `uint32_t**` pointers
+3. **Command processing**: `n64video_process_list()` reads RDP commands from RDRAM (or DMEM for XBUS DMA), dispatches them through angrylion's pixel-perfect pipeline
+4. **Parallel rendering**: angrylion splits scanline rasterization across multiple worker threads (pthreads → Web Workers with SharedArrayBuffer)
+5. **Interrupt**: On `sync_full`, angrylion sets a flag; ares raises `MI::IRQ::DP` to signal frame completion
+6. **Display**: ares's VI reads the RDRAM framebuffer as usual → WebGPU uploads to canvas (unchanged)
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `angrylion-rdp-plus/` | Submodule: ata4/angrylion-rdp-plus |
+| `wasm-patches/angrylion/angrylion_bridge.h` | C bridge API header |
+| `wasm-patches/angrylion/angrylion_bridge.c` | Maps ares DP registers → angrylion config, calls `n64video_process_list()` |
+| `wasm-patches/angrylion/msg_stub.c` | Logging stub (routes to stderr/console) |
+| `wasm-patches/web-ui/GNUmakefile` | Build rules: `-DUSE_ANGRYLION`, `-pthread`, angrylion compile targets |
+| `web/server.js` | HTTP server with COOP/COEP headers for SharedArrayBuffer |
+
+### Build Changes
+
+- `-DUSE_ANGRYLION` added to global flags (controls `#if` in render.cpp)
+- `-pthread` added globally (enables atomics/bulk-memory for all objects)
+- `-sPTHREAD_POOL_SIZE=4` link flag (pre-spawns 4 Web Workers)
+- `-sALLOW_BLOCKING_ON_MAIN_THREAD=1` (angrylion's fork-join blocks main thread while workers run)
+- angrylion core compiled as unity build (`n64video.c` includes `rdp.c` and `vi.c`)
+- Real `parallel.cpp` from angrylion used (std::thread/mutex/condition_variable)
+
+### Server Requirements
+
+SharedArrayBuffer requires COOP/COEP headers. The old `http-server` doesn't support these. Use `web/server.js` instead:
+
+```bash
+cd web && node server.js
+# Serves on http://localhost:3000 with:
+#   Cross-Origin-Opener-Policy: same-origin
+#   Cross-Origin-Embedder-Policy: require-corp
+```
+
+### Switching Between Renderers
+
+To revert to the custom software RDP, remove `-DUSE_ANGRYLION` and `-pthread` from the GNUmakefile flags, and do a clean rebuild. Both renderers coexist in `render.cpp` behind `#if defined(USE_ANGRYLION)`.
+
+### What angrylion Provides (vs custom RDP)
+
+| Feature | Custom RDP | angrylion |
+|---------|-----------|-----------|
+| Triangle rasterization | Basic scanline | Pixel-perfect, sub-pixel accurate |
+| Color combiner | 1-cycle only | Full 1-cycle and 2-cycle |
+| Texture filtering | Nearest only | Bilinear, nearest |
+| Perspective correction | No | Yes (W division) |
+| Anti-aliasing / coverage | No | Full coverage calculation |
+| Color/alpha dithering | No | Yes |
+| LOD / mipmapping | No | Yes |
+| Noise generator | Returns 0 | LFSR |
+| VI filtering | None (raw pixels) | Divot, gamma, AA, interpolation |
+
 ## RDP Software Renderer Changelog (2026-04-09)
 
 Before screenshot: `screenshots/ares_2026-04-08_20-55-40.png` — garbled blue stripes, broken rendering.
@@ -502,13 +586,10 @@ All changes in `wasm-patches/ares/n64/rdp/render.cpp`. Reference: `parallel-rdp/
 - No JIT recompiler on WASM (can't generate executable code)
 - Single-threaded (no Web Workers yet)
 
-### RDP Software Renderer
-- No perspective-correct texture mapping (W division)
-- No anti-aliasing / coverage calculation
-- No color/alpha dithering
-- Texture filtering is nearest-neighbor only (no bilinear)
-- No LOD (level of detail) / mipmapping
-- No 2-cycle combiner mode
+### RDP Rendering
+- angrylion-rdp-plus provides pixel-perfect RDP rendering (all features supported)
+- Custom software RDP still available as fallback (limited features, see changelog)
+- Performance is CPU-bound; angrylion parallelizes across Web Workers via pthreads
 
 ### Audio
 - Audio samples are drained but not output (no Web Audio integration yet)

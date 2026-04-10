@@ -1,6 +1,9 @@
 // ares WASM - WebGPU-powered N64 emulator frontend
 #include <n64/n64.hpp>
 #include <emscripten.h>
+
+// Global profiling counters — incremented from RDP code
+extern "C" double g_prof_rdp_time = 0;
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
@@ -411,87 +414,129 @@ static auto loadROMData(const u8* data, u32 size) -> bool {
 static EM_BOOL onKeyDown(int, const EmscriptenKeyboardEvent* e, void*) {
   auto& inp = platform.inputState;
   string key = e->key;
+  EM_ASM({ if(Module.onWasmKey) Module.onWasmKey(UTF8ToString($0), 1); }, (const char*)key);
+
   if(key == "x" || key == "X") inp.a = true;
   if(key == "z" || key == "Z") inp.b = true;
   if(key == "c" || key == "C") inp.z = true;
   if(key == "Enter") inp.start = true;
-  if(key == "ArrowUp") inp.dpadUp = true;
-  if(key == "ArrowDown") inp.dpadDown = true;
-  if(key == "ArrowLeft") inp.dpadLeft = true;
-  if(key == "ArrowRight") inp.dpadRight = true;
-  if(key == "a" || key == "A") inp.l = true;
-  if(key == "s" || key == "S") inp.r = true;
+  if(key == "w" || key == "W") inp.dpadUp = true;
+  if(key == "s" || key == "S") inp.dpadDown = true;
+  if(key == "a" || key == "A") inp.dpadLeft = true;
+  if(key == "d" || key == "D") inp.dpadRight = true;
+  if(key == "q" || key == "Q") inp.l = true;
+  if(key == "e" || key == "E") inp.r = true;
   if(key == "i" || key == "I") inp.cUp = true;
   if(key == "k" || key == "K") inp.cDown = true;
   if(key == "j" || key == "J") inp.cLeft = true;
   if(key == "l" || key == "L") inp.cRight = true;
-  if(key == "w" || key == "W") inp.axisY = 85;
-  if(key == "d" || key == "D") inp.axisX = 85;
-  if(key == "q" || key == "Q") inp.axisX = -85;
-  if(key == "e" || key == "E") inp.axisY = -85;
+  if(key == "ArrowUp") inp.axisY = -32768;
+  if(key == "ArrowDown") inp.axisY = 32767;
+  if(key == "ArrowLeft") inp.axisX = -32768;
+  if(key == "ArrowRight") inp.axisX = 32767;
   return EM_TRUE;
 }
 static EM_BOOL onKeyUp(int, const EmscriptenKeyboardEvent* e, void*) {
   auto& inp = platform.inputState;
   string key = e->key;
+  EM_ASM({ if(Module.onWasmKey) Module.onWasmKey(UTF8ToString($0), 0); }, (const char*)key);
+
   if(key == "x" || key == "X") inp.a = false;
   if(key == "z" || key == "Z") inp.b = false;
   if(key == "c" || key == "C") inp.z = false;
   if(key == "Enter") inp.start = false;
-  if(key == "ArrowUp") inp.dpadUp = false;
-  if(key == "ArrowDown") inp.dpadDown = false;
-  if(key == "ArrowLeft") inp.dpadLeft = false;
-  if(key == "ArrowRight") inp.dpadRight = false;
-  if(key == "a" || key == "A") inp.l = false;
-  if(key == "s" || key == "S") inp.r = false;
+  if(key == "w" || key == "W") inp.dpadUp = false;
+  if(key == "s" || key == "S") inp.dpadDown = false;
+  if(key == "a" || key == "A") inp.dpadLeft = false;
+  if(key == "d" || key == "D") inp.dpadRight = false;
+  if(key == "q" || key == "Q") inp.l = false;
+  if(key == "e" || key == "E") inp.r = false;
   if(key == "i" || key == "I") inp.cUp = false;
   if(key == "k" || key == "K") inp.cDown = false;
   if(key == "j" || key == "J") inp.cLeft = false;
   if(key == "l" || key == "L") inp.cRight = false;
-  if(key == "w" || key == "W") inp.axisY = 0;
-  if(key == "d" || key == "D") inp.axisX = 0;
-  if(key == "q" || key == "Q") inp.axisX = 0;
-  if(key == "e" || key == "E") inp.axisY = 0;
+  if(key == "ArrowUp") inp.axisY = 0;
+  if(key == "ArrowDown") inp.axisY = 0;
+  if(key == "ArrowLeft") inp.axisX = 0;
+  if(key == "ArrowRight") inp.axisX = 0;
   return EM_TRUE;
 }
 
 // ── Main loop ──────────────────���─────────────────────────────
 
+// Profiling accumulators (reset every report interval)
+static struct {
+  double cpuTime = 0;      // cpu.instruction()
+  double syncTime = 0;     // cpu.synchronize() (RSP, RDP, VI, etc.)
+  double renderTime = 0;   // renderFrame() (WebGPU upload)
+  double totalTime = 0;    // full mainLoop time
+  u32 instrCount = 0;
+  u32 loopCount = 0;       // browser frames
+  u32 n64Frames = 0;       // VI refreshes
+  double lastReport = 0;
+} prof;
+
 static void mainLoop() {
   if(!emulatorRunning || !gpuDevice) return;
 
+  double loopStart = emscripten_get_now();
+
   auto& cpu = ares::Nintendo64::cpu;
   auto& vi  = ares::Nintendo64::vi;
-  double deadline = emscripten_get_now() + 50.0;
+  double deadline = loopStart + 50.0;
 
   while(emscripten_get_now() < deadline) {
+    double batchStart = emscripten_get_now();
     for(u32 i = 0; i < 4096; i++) {
       cpu.instruction();
       cpu.synchronize();
       if(vi.refreshed) {
         vi.refreshed = false;
         frameCount++;
+        prof.n64Frames++;
       }
     }
+    double batchEnd = emscripten_get_now();
+    prof.cpuTime += (batchEnd - batchStart);  // "emulation" time (CPU+sync combined)
+    prof.instrCount += 4096;
   }
 
-  // Render once per browser frame with the latest N64 framebuffer
+  double rStart = emscripten_get_now();
   renderFrame();
+  double rEnd = emscripten_get_now();
+  prof.renderTime += (rEnd - rStart);
+  prof.totalTime += (rEnd - loopStart);
+  prof.loopCount++;
 
-  static double lastLog = 0;
+  // Report every 5 seconds
   double now = emscripten_get_now();
-  if(now - lastLog > 5000.0) {
-    // Sample center pixel directly from RDRAM
-    u32 px = 0;
-    if(vi.io.dramAddress && vi.io.width) {
-      auto& rdram = ares::Nintendo64::rdram;
-      u32 addr = vi.io.dramAddress + (120 * vi.io.width + 160) * 2;
-      px = rdram.ram.read<ares::Nintendo64::Half>(addr);
-    }
-    EM_ASM({ if(Module.print) Module.print(
-      "frames=" + $0 + " viBuf=0x" + ($1>>>0).toString(16) + " px=0x" + ($2>>>0).toString(16)
-    ); }, (int)frameCount, (int)vi.io.dramAddress, (int)px);
-    lastLog = now;
+  if(now - prof.lastReport > 5000.0) {
+    double sec = (now - prof.lastReport) / 1000.0;
+    double loops = prof.loopCount > 0 ? prof.loopCount : 1;
+    double rdpTime = g_prof_rdp_time;
+    double cpuRspTime = prof.cpuTime - rdpTime;  // emulation minus RDP = CPU+RSP
+    g_prof_rdp_time = 0;
+    EM_ASM({
+      if(Module.onProfile) Module.onProfile({
+        emuMs:       ($0 / $6).toFixed(2),
+        cpuRspMs:    ($8 / $6).toFixed(2),
+        rdpMs:       ($9 / $6).toFixed(2),
+        renderMs:    ($2 / $6).toFixed(2),
+        totalMs:     ($3 / $6).toFixed(2),
+        instrPerSec: (($4 / $7) / 1e6).toFixed(2),
+        n64Fps:      ($5 / $7).toFixed(1),
+        browserFps:  ($6 / $7).toFixed(1),
+      });
+    },
+      prof.cpuTime, prof.syncTime, prof.renderTime, prof.totalTime,
+      (double)prof.instrCount, (double)prof.n64Frames,
+      (double)prof.loopCount, sec,
+      cpuRspTime, rdpTime
+    );
+
+    prof.cpuTime = prof.syncTime = prof.renderTime = prof.totalTime = 0;
+    prof.instrCount = prof.loopCount = prof.n64Frames = 0;
+    prof.lastReport = now;
   }
 }
 
