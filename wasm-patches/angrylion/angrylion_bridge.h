@@ -36,6 +36,9 @@ void angrylion_close(void);
 // Flag set by angrylion's sync_full handler
 extern volatile bool angrylion_sync_full_pending;
 
+// Frame skip: 0 = render every frame, 1 = skip 1 (render every 2nd), 3 = skip 3, etc.
+void angrylion_set_frameskip(int skip);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,5 +20,8 @@ if exist "out\ares" copy /y "out\ares" "%ROOT%web\ares.js" >nul
 if exist "out\ares.wasm" copy /y "out\ares.wasm" "%ROOT%web\" >nul
 if exist "out\ares.data" copy /y "out\ares.data" "%ROOT%web\" >nul
 
+:: Copy default ROM for auto-loading
+if exist "%ROOT%games\F-Zero X (USA).z64" copy /y "%ROOT%games\F-Zero X (USA).z64" "%ROOT%web\rom.z64" >nul
+
 echo [OK] Build deployed to web/
 endlocal

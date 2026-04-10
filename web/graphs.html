@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ares profile graphs</title>
+  <style>
+    body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 20px; }
+    h1 { color: #e94560; font-size: 20px; margin-bottom: 16px; }
+    h2 { color: #4ecca3; font-size: 14px; margin: 16px 0 8px; }
+    .chart { background: #0d1117; border: 1px solid #0f3460; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+    .legend { font-size: 11px; color: #888; margin-bottom: 8px; }
+    .legend span { display: inline-block; margin-right: 12px; }
+    .legend i { display: inline-block; width: 12px; height: 12px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+    .stats { font-family: 'Cascadia Code', monospace; font-size: 11px; color: #8b949e; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #1a1a2e; font-size: 11px; }
+    th { color: #4ecca3; }
+    .label-cell { color: #f0a500; }
+    button { padding: 6px 12px; background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; cursor: pointer; margin-right: 8px; }
+    button:hover { background: #0f3460; }
+    select { padding: 6px; background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>ares profile data</h1>
+  <div style="margin-bottom:12px;">
+    <button onclick="loadData()">Refresh</button>
+    <button onclick="clearData()">Clear CSV</button>
+    <label>Filter: <select id="filter" onchange="render()"><option value="">All labels</option></select></label>
+  </div>
+
+  <div class="chart">
+    <h2>Frame time breakdown (ms/frame)</h2>
+    <div class="legend">
+      <span><i style="background:#4ecca3"></i>CPU loop</span>
+      <span><i style="background:#f0a500"></i>Sync</span>
+      <span><i style="background:#e94560"></i>RDP</span>
+      <span><i style="background:#888"></i>Total</span>
+    </div>
+    <canvas id="chart-times" width="1100" height="240"></canvas>
+  </div>
+
+  <div class="chart">
+    <h2>Throughput</h2>
+    <div class="legend">
+      <span><i style="background:#4ecca3"></i>MIPS</span>
+      <span><i style="background:#f0a500"></i>N64 FPS</span>
+      <span><i style="background:#e94560"></i>Browser FPS</span>
+    </div>
+    <canvas id="chart-fps" width="1100" height="240"></canvas>
+  </div>
+
+  <div class="chart">
+    <h2>Per-label averages (in-memory, current CSV)</h2>
+    <div id="averages" class="stats">Loading...</div>
+  </div>
+
+  <div class="chart">
+    <h2>Benchmark trend (one row per experiment, oldest → newest)</h2>
+    <div class="legend">
+      <span><i style="background:#4ecca3"></i>avg N64 FPS</span>
+      <span><i style="background:#f0a500"></i>min N64 FPS</span>
+      <span><i style="background:#e94560"></i>max N64 FPS</span>
+    </div>
+    <canvas id="chart-trend" width="1100" height="240"></canvas>
+    <div id="trend-table" class="stats" style="margin-top:8px;">Loading benchmark-scores.csv...</div>
+  </div>
+
+  <script>
+    let rows = [];
+
+    async function loadData() {
+      try {
+        const r = await fetch('profile-data.csv?t=' + Date.now());
+        const text = await r.text();
+        const lines = text.trim().split('\n');
+        const headers = lines[0].split(',');
+        rows = lines.slice(1).map(line => {
+          const cols = line.split(',');
+          const o = {};
+          headers.forEach((h, i) => o[h] = cols[i]);
+          return o;
+        });
+        // Populate filter
+        const labels = [...new Set(rows.map(r => r.label))];
+        const filterEl = document.getElementById('filter');
+        filterEl.innerHTML = '<option value="">All labels (' + rows.length + ' samples)</option>';
+        labels.forEach(l => {
+          const count = rows.filter(r => r.label === l).length;
+          filterEl.innerHTML += `<option value="${l}">${l} (${count})</option>`;
+        });
+        render();
+      } catch(e) {
+        document.getElementById('averages').textContent = 'Failed to load profile-data.csv: ' + e.message;
+      }
+    }
+
+    async function clearData() {
+      if (!confirm('Clear all CSV data?')) return;
+      // Just truncate by sending a special POST
+      await fetch('/clear-csv', { method: 'POST' }).catch(() => {});
+      rows = [];
+      render();
+    }
+
+    function render() {
+      const filter = document.getElementById('filter').value;
+      const data = filter ? rows.filter(r => r.label === filter) : rows;
+
+      drawTimeChart(data);
+      drawFpsChart(data);
+      drawAverages();
+    }
+
+    function drawTimeChart(data) {
+      const c = document.getElementById('chart-times');
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, c.width, c.height);
+      if (!data.length) return;
+
+      const W = c.width, H = c.height;
+      const PAD = 30;
+      const maxY = Math.max(...data.map(r => parseFloat(r.totalMs) || 0)) * 1.1 || 60;
+
+      // Grid
+      ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = PAD + (H - PAD * 2) * (i / 4);
+        ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke();
+        ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+        ctx.fillText((maxY * (1 - i / 4)).toFixed(0) + 'ms', 4, y + 3);
+      }
+
+      function plot(field, color) {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        data.forEach((r, i) => {
+          const x = PAD + (W - PAD * 2) * (i / Math.max(1, data.length - 1));
+          const v = parseFloat(r[field]) || 0;
+          const y = PAD + (H - PAD * 2) * (1 - v / maxY);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+      plot('cpuMs', '#4ecca3');
+      plot('syncMs', '#f0a500');
+      plot('rdpMs', '#e94560');
+      plot('totalMs', '#888');
+
+      // Draw label boundaries
+      let lastLabel = null;
+      data.forEach((r, i) => {
+        if (r.label !== lastLabel) {
+          const x = PAD + (W - PAD * 2) * (i / Math.max(1, data.length - 1));
+          ctx.strokeStyle = '#333'; ctx.setLineDash([2, 4]);
+          ctx.beginPath(); ctx.moveTo(x, PAD); ctx.lineTo(x, H - PAD); ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#f0a500'; ctx.font = '10px monospace';
+          ctx.fillText(r.label, x + 2, PAD + 12);
+          lastLabel = r.label;
+        }
+      });
+    }
+
+    function drawFpsChart(data) {
+      const c = document.getElementById('chart-fps');
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, c.width, c.height);
+      if (!data.length) return;
+
+      const W = c.width, H = c.height;
+      const PAD = 30;
+      const maxFps = 60;
+      const maxMips = 30;
+
+      ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 1;
+      for (let i = 0; i <= 6; i++) {
+        const y = PAD + (H - PAD * 2) * (i / 6);
+        ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke();
+        ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+        ctx.fillText((maxFps * (1 - i / 6)).toFixed(0), 4, y + 3);
+        ctx.fillText((maxMips * (1 - i / 6)).toFixed(0), W - 28, y + 3);
+      }
+
+      function plot(field, color, scale) {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        data.forEach((r, i) => {
+          const x = PAD + (W - PAD * 2) * (i / Math.max(1, data.length - 1));
+          const v = parseFloat(r[field]) || 0;
+          const y = PAD + (H - PAD * 2) * (1 - Math.min(1, v / scale));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+      plot('instrPerSec', '#4ecca3', maxMips);
+      plot('n64Fps', '#f0a500', maxFps);
+      plot('browserFps', '#e94560', maxFps);
+    }
+
+    function drawAverages() {
+      const labels = [...new Set(rows.map(r => r.label))];
+      let html = '<table><tr><th>Label</th><th>Samples</th><th>CPU</th><th>Sync</th><th>RDP</th><th>Total</th><th>MIPS</th><th>N64 FPS</th><th>Browser FPS</th></tr>';
+      labels.forEach(l => {
+        const subset = rows.filter(r => r.label === l);
+        const avg = (field) => (subset.reduce((s, r) => s + (parseFloat(r[field]) || 0), 0) / subset.length).toFixed(2);
+        html += `<tr>
+          <td class="label-cell">${l}</td>
+          <td>${subset.length}</td>
+          <td>${avg('cpuMs')}</td>
+          <td>${avg('syncMs')}</td>
+          <td>${avg('rdpMs')}</td>
+          <td>${avg('totalMs')}</td>
+          <td>${avg('instrPerSec')}</td>
+          <td>${avg('n64Fps')}</td>
+          <td>${avg('browserFps')}</td>
+        </tr>`;
+      });
+      html += '</table>';
+      document.getElementById('averages').innerHTML = html;
+    }
+
+    // Load benchmark scores trend CSV
+    async function loadScores() {
+      try {
+        const r = await fetch('benchmark-scores.csv?t=' + Date.now());
+        if (!r.ok) { document.getElementById('trend-table').textContent = 'No benchmark-scores.csv yet'; return; }
+        const text = await r.text();
+        const lines = text.trim().split('\n');
+        if (lines.length < 2) { document.getElementById('trend-table').textContent = 'No benchmark runs yet'; return; }
+        const headers = lines[0].split(',');
+        const scores = lines.slice(1).map(line => {
+          const cols = line.split(',');
+          const o = {};
+          headers.forEach((h, i) => o[h] = cols[i]);
+          return o;
+        });
+
+        drawTrendChart(scores);
+        drawTrendTable(scores);
+      } catch(e) {
+        document.getElementById('trend-table').textContent = 'Failed: ' + e.message;
+      }
+    }
+
+    function drawTrendChart(scores) {
+      const c = document.getElementById('chart-trend');
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, c.width, c.height);
+      if (!scores.length) return;
+
+      const W = c.width, H = c.height, PAD = 30;
+      const maxFps = 60;
+
+      ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 1;
+      for (let i = 0; i <= 6; i++) {
+        const y = PAD + (H - PAD * 2) * (i / 6);
+        ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke();
+        ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+        ctx.fillText((maxFps * (1 - i / 6)).toFixed(0) + ' fps', 4, y + 3);
+      }
+      // 60fps target line
+      const targetY = PAD + (H - PAD * 2) * (1 - 60 / maxFps);
+      ctx.strokeStyle = '#4ecca3'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(PAD, targetY); ctx.lineTo(W - PAD, targetY); ctx.stroke();
+      ctx.setLineDash([]);
+
+      function plot(field, color, fill) {
+        ctx.strokeStyle = color; ctx.lineWidth = 2;
+        ctx.beginPath();
+        scores.forEach((s, i) => {
+          const x = PAD + (W - PAD * 2) * (i / Math.max(1, scores.length - 1));
+          const v = parseFloat(s[field]) || 0;
+          const y = PAD + (H - PAD * 2) * (1 - Math.min(1, v / maxFps));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        // Dots at each point
+        ctx.fillStyle = color;
+        scores.forEach((s, i) => {
+          const x = PAD + (W - PAD * 2) * (i / Math.max(1, scores.length - 1));
+          const v = parseFloat(s[field]) || 0;
+          const y = PAD + (H - PAD * 2) * (1 - Math.min(1, v / maxFps));
+          ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+        });
+      }
+      plot('minN64Fps', '#f0a500');
+      plot('maxN64Fps', '#e94560');
+      plot('avgN64Fps', '#4ecca3');
+
+      // Labels under each point
+      ctx.fillStyle = '#888'; ctx.font = '9px monospace';
+      scores.forEach((s, i) => {
+        const x = PAD + (W - PAD * 2) * (i / Math.max(1, scores.length - 1));
+        ctx.save();
+        ctx.translate(x, H - PAD + 12);
+        ctx.rotate(-Math.PI / 4);
+        ctx.fillText(s.label || '', 0, 0);
+        ctx.restore();
+      });
+    }
+
+    function drawTrendTable(scores) {
+      let html = '<table><tr><th>#</th><th>Label</th><th>Build</th><th>Samples</th><th>Avg FPS</th><th>Min</th><th>Max</th><th>Total ms</th><th>CPU</th><th>Sync</th><th>RDP</th><th>MIPS</th></tr>';
+      scores.forEach((s, i) => {
+        html += `<tr>
+          <td>${i + 1}</td>
+          <td class="label-cell">${s.label || '?'}</td>
+          <td style="font-size:10px;">${s.buildId || '?'}</td>
+          <td>${s.sampleCount || 0}</td>
+          <td>${s.avgN64Fps}</td>
+          <td>${s.minN64Fps}</td>
+          <td>${s.maxN64Fps}</td>
+          <td>${s.avgTotalMs}</td>
+          <td>${s.avgCpuMs}</td>
+          <td>${s.avgSyncMs}</td>
+          <td>${s.avgRdpMs}</td>
+          <td>${s.avgInstrPerSec}</td>
+        </tr>`;
+      });
+      html += '</table>';
+      document.getElementById('trend-table').innerHTML = html;
+    }
+
+    loadData();
+    loadScores();
+    setInterval(function() { loadData(); loadScores(); }, 10000);
+  </script>
+</body>
+</html>
