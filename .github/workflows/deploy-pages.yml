@@ -1,0 +1,98 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Verify emscripten
+        run: emcc --version
+
+      - name: Prepare build directory
+        run: |
+          mkdir -p build
+          cp -r ares/ares build/
+          cp -r ares/nall build/
+          cp -r ares/libco build/
+          cp -r ares/ruby build/
+          cp -r ares/hiro build/
+          cp -r ares/mia build/
+          cp -r ares/thirdparty build/
+          [ -d ares/scripts ] && cp -r ares/scripts build/ || true
+          mkdir -p build/web-ui
+          # Apply wasm patches on top
+          cp -a wasm-patches/. build/
+          # Copy PIF ROMs needed by the WASM build
+          cp ares/ares/System/Nintendo\ 64/pif.ntsc.rom build/web-ui/
+          cp ares/ares/System/Nintendo\ 64/pif.pal.rom build/web-ui/
+          # Touch source files so make picks them up
+          find build -name '*.cpp' -exec touch {} +
+          find build -name '*.hpp' -exec touch {} +
+          touch build/LICENSE
+
+      - name: Build WASM
+        working-directory: build/web-ui
+        run: |
+          emmake make -j$(nproc) wasm32=true platform=linux
+
+      - name: Verify build artifacts
+        run: |
+          ls -la build/web-ui/out/
+          test -f build/web-ui/out/ares
+          test -f build/web-ui/out/ares.wasm
+          test -f build/web-ui/out/ares.data
+
+      - name: Stage site for GitHub Pages
+        run: |
+          mkdir -p _site
+          cp web/index.html           _site/
+          cp web/coi-serviceworker.js  _site/
+          cp build/web-ui/out/ares    _site/ares.js
+          cp build/web-ui/out/ares.wasm _site/ares.wasm
+          cp build/web-ui/out/ares.data _site/ares.data
+          ls -la _site/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
