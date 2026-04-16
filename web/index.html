@@ -4,21 +4,26 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ares - N64 Emulator</title>
-  <!-- COOP/COEP headers come from server.js directly, no SW needed -->
   <script>
-    // Auto-unregister any leftover service worker (clean up old coi-serviceworker)
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then(function(regs) {
-        if (regs.length > 0) {
-          console.log('[cleanup] unregistering ' + regs.length + ' service worker(s)');
-          Promise.all(regs.map(function(r) { return r.unregister(); })).then(function() {
-            console.log('[cleanup] done, reloading');
-            window.location.reload();
-          });
-        }
-      });
+    // If running on a static host (GitHub Pages, itch.io), we need the service worker
+    // to inject COOP/COEP headers for SharedArrayBuffer support.
+    // On localhost (dev server), server.js provides headers directly.
+    if (window.crossOriginIsolated) {
+      // Already isolated (server.js or SW active) — clean up any stale SW
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          // Don't unregister on static hosts where SW is the source of isolation
+          if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+            regs.forEach(function(r) { r.unregister(); });
+          }
+        });
+      }
+    } else {
+      // Not isolated — need coi-serviceworker to add COOP/COEP headers
+      console.log('[coi] not cross-origin isolated, loading service worker...');
     }
   </script>
+  <script src="coi-serviceworker.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -127,6 +132,113 @@
       font-size: 12px;
       color: #555;
     }
+
+    /* ── Mobile responsive ── */
+    @media (max-width: 768px) {
+      header h1 { font-size: 18px; }
+      header p { font-size: 11px; }
+      header { padding: 8px 12px; }
+      #canvas-container { margin-top: 8px; border-width: 2px; border-radius: 4px; width: 100%; }
+      canvas#canvas { width: 100%; height: auto; aspect-ratio: 4/3; }
+      #status-bar { min-width: auto; width: 90%; font-size: 12px; margin-top: 8px; }
+      #controls { flex-wrap: wrap; justify-content: center; margin-top: 8px; gap: 8px; }
+      #controls button, #controls label { font-size: 13px; padding: 10px 16px; }
+      #input-panel { display: none; }
+      #profile-panel { display: none; }
+      .desktop-only { display: none !important; }
+      #output { width: 90%; font-size: 10px; max-height: 80px; }
+    }
+
+    /* ── Touch controller overlay ── */
+    #touch-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 100;
+      pointer-events: none;
+      touch-action: none;
+    }
+    #touch-overlay.active { display: block; }
+
+    .touch-btn {
+      position: absolute;
+      pointer-events: auto;
+      touch-action: none;
+      background: rgba(255,255,255,0.12);
+      border: 2px solid rgba(255,255,255,0.25);
+      border-radius: 50%;
+      color: rgba(255,255,255,0.7);
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-user-select: none;
+      transition: background 0.05s;
+      font-family: system-ui, sans-serif;
+    }
+    .touch-btn.pressed {
+      background: rgba(78, 204, 163, 0.4);
+      border-color: rgba(78, 204, 163, 0.7);
+    }
+
+    /* D-Pad buttons */
+    .touch-dpad { width: 56px; height: 56px; font-size: 22px; border-radius: 12px; }
+
+    /* Action buttons (A, B) */
+    .touch-action { width: 64px; height: 64px; font-size: 20px; }
+    .touch-action.btn-touch-a { background: rgba(50,50,220,0.25); border-color: rgba(80,80,255,0.5); }
+    .touch-action.btn-touch-b { background: rgba(50,180,50,0.2); border-color: rgba(80,220,80,0.45); }
+
+    /* C-buttons */
+    .touch-cbtn { width: 42px; height: 42px; font-size: 11px; background: rgba(240,208,0,0.15); border-color: rgba(240,208,0,0.35); color: rgba(240,208,0,0.8); }
+
+    /* Shoulder / Z / Start */
+    .touch-shoulder { width: 72px; height: 40px; font-size: 14px; border-radius: 10px; }
+    .touch-start { width: 60px; height: 36px; font-size: 12px; border-radius: 18px; }
+    .touch-z { width: 56px; height: 44px; font-size: 16px; border-radius: 10px; }
+
+    /* Analog stick zone */
+    #touch-stick-zone {
+      position: absolute;
+      bottom: 30px; left: 16px;
+      width: 140px; height: 140px;
+      pointer-events: auto;
+      touch-action: none;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.05);
+      border: 2px solid rgba(255,255,255,0.12);
+    }
+    #touch-stick-knob {
+      position: absolute;
+      width: 50px; height: 50px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.2);
+      border: 2px solid rgba(255,255,255,0.35);
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      transition: none;
+    }
+
+    /* Fullscreen canvas fill */
+    body.game-fullscreen { overflow: hidden; background: #000; }
+    body.game-fullscreen header,
+    body.game-fullscreen #status-bar,
+    body.game-fullscreen #controls,
+    body.game-fullscreen #output,
+    body.game-fullscreen #input-panel,
+    body.game-fullscreen #profile-panel,
+    body.game-fullscreen footer,
+    body.game-fullscreen .desktop-only { display: none !important; }
+    body.game-fullscreen #canvas-container {
+      margin: 0; border: none; border-radius: 0;
+      width: 100vw; height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+    }
+    body.game-fullscreen canvas#canvas {
+      width: 100vw; height: 100vh;
+      object-fit: contain;
+    }
   </style>
 </head>
 <body>
@@ -152,7 +264,7 @@
     <button id="btn-fullscreen">Fullscreen</button>
   </div>
 
-  <div style="position:relative;width:640px;">
+  <div class="desktop-only" style="position:relative;width:640px;">
     <button id="btn-copy" style="position:absolute;top:4px;right:4px;padding:2px 8px;font-size:11px;z-index:1;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
     <div id="output"></div>
   </div>
@@ -217,6 +329,43 @@
     <pre id="profile-data" style="margin:0;white-space:pre;">Waiting for data...</pre>
   </div>
 
+  <!-- ── Touch controller overlay (shown on mobile when ROM is loaded) ── -->
+  <div id="touch-overlay">
+    <!-- Shoulder buttons -->
+    <div class="touch-btn touch-shoulder" data-key="q" style="top:8px;left:16px;">L</div>
+    <div class="touch-btn touch-shoulder" data-key="e" style="top:8px;right:16px;">R</div>
+
+    <!-- Start -->
+    <div class="touch-btn touch-start" data-key="Enter" style="top:14px;left:50%;transform:translateX(-50%);">START</div>
+
+    <!-- D-Pad -->
+    <div class="touch-btn touch-dpad" data-key="w" style="bottom:200px;left:52px;">&#x25B2;</div>
+    <div class="touch-btn touch-dpad" data-key="s" style="bottom:90px;left:52px;">&#x25BC;</div>
+    <div class="touch-btn touch-dpad" data-key="a" style="bottom:145px;left:2px;">&#x25C0;</div>
+    <div class="touch-btn touch-dpad" data-key="d" style="bottom:145px;left:102px;">&#x25B6;</div>
+
+    <!-- A / B buttons -->
+    <div class="touch-btn touch-action btn-touch-a" data-key="x" style="bottom:140px;right:24px;">A</div>
+    <div class="touch-btn touch-action btn-touch-b" data-key="z" style="bottom:200px;right:88px;">B</div>
+
+    <!-- Z trigger -->
+    <div class="touch-btn touch-z" data-key="c" style="bottom:60px;left:50%;transform:translateX(-50%);">Z</div>
+
+    <!-- C-buttons -->
+    <div class="touch-btn touch-cbtn" data-key="i" style="bottom:280px;right:52px;">C&#x25B2;</div>
+    <div class="touch-btn touch-cbtn" data-key="k" style="bottom:200px;right:52px;">C&#x25BC;</div>
+    <div class="touch-btn touch-cbtn" data-key="j" style="bottom:240px;right:96px;">C&#x25C0;</div>
+    <div class="touch-btn touch-cbtn" data-key="l" style="bottom:240px;right:8px;">C&#x25B6;</div>
+
+    <!-- Analog stick (virtual joystick) -->
+    <div id="touch-stick-zone">
+      <div id="touch-stick-knob"></div>
+    </div>
+
+    <!-- Exit fullscreen button -->
+    <div id="touch-exit-fs" class="touch-btn" style="top:8px;right:90px;width:36px;height:36px;font-size:18px;border-radius:8px;">&#x2715;</div>
+  </div>
+
   <footer>
     ares &mdash; Multi-System Emulator
   </footer>
@@ -276,6 +425,7 @@
               Module.FS.writeFile('/rom.z64', data);
               Module._loadROM(0, 0);
               log('[auto-load] ROM started');
+              enterGameMode();
             } catch(e) {
               log('[ERR] auto-load: ' + e.message);
             }
@@ -471,10 +621,7 @@
 
     // Fullscreen
     document.getElementById('btn-fullscreen').addEventListener('click', function() {
-      const canvas = document.getElementById('canvas');
-      if (canvas.requestFullscreen) canvas.requestFullscreen();
-      else if (canvas.webkitRequestFullscreen) canvas.webkitRequestFullscreen();
-      canvas.focus();
+      enterGameMode();
     });
 
     // Reset
@@ -503,6 +650,7 @@
             Module.FS.writeFile('/rom.z64', data);
             Module._loadROM(0, 0);
             log('ROM sent to emulator: ' + file.name);
+            enterGameMode();
           } catch(e) {
             log('[ERR] ' + e.message);
           }
@@ -543,6 +691,188 @@
     });
 
     setStatus('Loading emulator...', 'loading');
+
+    // ── Mobile detection ──
+    var isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+                   || ('ontouchstart' in window && window.innerWidth < 1024);
+
+    // ── Fullscreen + touch overlay on ROM load ──
+    var romLoaded = false;
+
+    function enterGameMode() {
+      romLoaded = true;
+      var el = document.documentElement;
+      function applyGameMode() {
+        document.body.classList.add('game-fullscreen');
+        if (isMobile) {
+          document.getElementById('touch-overlay').classList.add('active');
+        }
+        if (screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock('landscape').catch(function(){});
+        }
+        document.getElementById('canvas').focus();
+      }
+      // requestFullscreen requires user gesture — apply game mode only if it succeeds
+      if (el.requestFullscreen) {
+        el.requestFullscreen().then(applyGameMode).catch(function() {
+          // No user gesture (e.g. auto-load) — skip fullscreen
+          log('[fullscreen] requires user gesture, skipped');
+        });
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+        applyGameMode();
+      } else {
+        applyGameMode();
+      }
+    }
+
+    function exitGameMode() {
+      document.body.classList.remove('game-fullscreen');
+      document.getElementById('touch-overlay').classList.remove('active');
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(function(){});
+      }
+      if (screen.orientation && screen.orientation.unlock) {
+        screen.orientation.unlock();
+      }
+    }
+
+    // Listen for fullscreen exit (e.g. pressing Escape)
+    document.addEventListener('fullscreenchange', function() {
+      if (!document.fullscreenElement) {
+        document.body.classList.remove('game-fullscreen');
+        document.getElementById('touch-overlay').classList.remove('active');
+      }
+    });
+
+    // Exit fullscreen button
+    document.getElementById('touch-exit-fs').addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      exitGameMode();
+    });
+    document.getElementById('touch-exit-fs').addEventListener('click', function(e) {
+      e.preventDefault();
+      exitGameMode();
+    });
+
+    // ── Touch button handlers ──
+    // Dispatch synthetic keyboard events so the emscripten key handlers pick them up
+    function sendKey(key, down) {
+      var evType = down ? 'keydown' : 'keyup';
+      var ev = new KeyboardEvent(evType, {
+        key: key,
+        code: 'Key' + key.toUpperCase(),
+        bubbles: true,
+        cancelable: true
+      });
+      document.dispatchEvent(ev);
+    }
+
+    var touchBtns = document.querySelectorAll('.touch-btn[data-key]');
+    touchBtns.forEach(function(btn) {
+      var key = btn.getAttribute('data-key');
+
+      btn.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        btn.classList.add('pressed');
+        sendKey(key, true);
+      }, { passive: false });
+
+      btn.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        btn.classList.remove('pressed');
+        sendKey(key, false);
+      }, { passive: false });
+
+      btn.addEventListener('touchcancel', function(e) {
+        btn.classList.remove('pressed');
+        sendKey(key, false);
+      });
+    });
+
+    // ── Virtual analog stick ──
+    (function() {
+      var zone = document.getElementById('touch-stick-zone');
+      var knob = document.getElementById('touch-stick-knob');
+      var stickActive = false;
+      var stickId = null;
+      var centerX = 0, centerY = 0;
+      var radius = 50;
+      // Track which analog directions are currently active
+      var axisState = { up: false, down: false, left: false, right: false };
+
+      function updateAxis(dx, dy) {
+        // Normalize to -1..1
+        var nx = Math.max(-1, Math.min(1, dx / radius));
+        var ny = Math.max(-1, Math.min(1, dy / radius));
+        var deadzone = 0.25;
+
+        var wantUp = ny < -deadzone;
+        var wantDown = ny > deadzone;
+        var wantLeft = nx < -deadzone;
+        var wantRight = nx > deadzone;
+
+        if (wantUp !== axisState.up) { sendKey('ArrowUp', wantUp); axisState.up = wantUp; }
+        if (wantDown !== axisState.down) { sendKey('ArrowDown', wantDown); axisState.down = wantDown; }
+        if (wantLeft !== axisState.left) { sendKey('ArrowLeft', wantLeft); axisState.left = wantLeft; }
+        if (wantRight !== axisState.right) { sendKey('ArrowRight', wantRight); axisState.right = wantRight; }
+      }
+
+      zone.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        var touch = e.changedTouches[0];
+        stickId = touch.identifier;
+        stickActive = true;
+        var rect = zone.getBoundingClientRect();
+        centerX = rect.left + rect.width / 2;
+        centerY = rect.top + rect.height / 2;
+        var dx = touch.clientX - centerX;
+        var dy = touch.clientY - centerY;
+        var dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > radius) { dx = dx/dist*radius; dy = dy/dist*radius; }
+        knob.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
+        updateAxis(dx, dy);
+      }, { passive: false });
+
+      zone.addEventListener('touchmove', function(e) {
+        e.preventDefault();
+        if (!stickActive) return;
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          if (e.changedTouches[i].identifier === stickId) {
+            var touch = e.changedTouches[i];
+            var dx = touch.clientX - centerX;
+            var dy = touch.clientY - centerY;
+            var dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist > radius) { dx = dx/dist*radius; dy = dy/dist*radius; }
+            knob.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
+            updateAxis(dx, dy);
+          }
+        }
+      }, { passive: false });
+
+      function releaseStick() {
+        stickActive = false;
+        stickId = null;
+        knob.style.transform = 'translate(-50%, -50%)';
+        // Release all axes
+        if (axisState.up) { sendKey('ArrowUp', false); axisState.up = false; }
+        if (axisState.down) { sendKey('ArrowDown', false); axisState.down = false; }
+        if (axisState.left) { sendKey('ArrowLeft', false); axisState.left = false; }
+        if (axisState.right) { sendKey('ArrowRight', false); axisState.right = false; }
+      }
+
+      zone.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          if (e.changedTouches[i].identifier === stickId) releaseStick();
+        }
+      }, { passive: false });
+
+      zone.addEventListener('touchcancel', releaseStick);
+    })();
+
+    // ── Override ROM load to enter game mode ──
+    var origLoadROM = null;
   </script>
 
   <script>
