@@ -5,7 +5,7 @@ openmp := false
 vulkan := true
 local := true
 lto := true
-flags += -I. -I.. -I../ares -I../thirdparty -DMIA_LIBRARY -pthread
+flags += -I. -I.. -I../ares -I../thirdparty -DMIA_LIBRARY
 
 # WASM SIMD: lets emscripten translate SSE4.1 intrinsics to WASM SIMD,
 # enabling the SIMD path for the RSP VU (huge perf win for 3D games).
@@ -56,7 +56,7 @@ nall.objects.filtered := $(filter-out $(object.path)/nall-main.o,$(nall.objects)
 # angrylion RDP objects (unity build: n64video.c #includes rdp.c and vi.c)
 angrylion.objects := $(object.path)/alp-n64video.o
 angrylion.objects += $(object.path)/alp-bridge.o $(object.path)/alp-parallel.o $(object.path)/alp-msg.o
-angrylion.flags := -I$(angrylion.src) -I../angrylion -pthread
+angrylion.flags := -I$(angrylion.src) -I../angrylion
 
 $(object.path)/alp-n64video.o: $(angrylion.src)/n64video.c
 	$(info Compiling angrylion n64video.c ...)
@@ -86,9 +86,8 @@ ifeq ($(wasm32),true)
   all.options += -sEXPORTED_FUNCTIONS=_main,_resetEmulator,_loadROM,_getBuildId,_malloc,_free
   all.options += --preload-file pif.ntsc.rom
   all.options += --preload-file pif.pal.rom
-  # pthreads for angrylion parallel rendering
-  all.options += -pthread -sPTHREAD_POOL_SIZE=4
-  all.options += -sALLOW_BLOCKING_ON_MAIN_THREAD=1
+  # pthreads disabled — single-threaded stub is faster in WASM
+  # (mutex/condvar overhead through Atomics/futex kills fine-grained parallelism)
 endif
 
 $(all.objects): | $(object.path)

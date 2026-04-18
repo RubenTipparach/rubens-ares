@@ -499,7 +499,7 @@ static void mainLoop() {
   double deadline = loopStart + 50.0;
 
   // Batch CPU instructions before synchronizing other subsystems.
-  constexpr u32 SYNC_INTERVAL = 128;
+  constexpr u32 SYNC_INTERVAL = 256;
 
   while(emscripten_get_now() < deadline) {
     double batchStart = emscripten_get_now();

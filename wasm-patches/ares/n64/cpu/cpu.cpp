@@ -53,11 +53,11 @@ auto CPU::synchronize() -> void {
   rsp.clock -= clocks;
   rdp.clock -= clocks;
   pif.clock -= clocks;
-  vi.main();
-  ai.main();
-  rsp.main();
-  rdp.main();
-  pif.main();
+  if( vi.clock < 0)  vi.main();
+  if( ai.clock < 0)  ai.main();
+  if(rsp.clock < 0) rsp.main();
+  if(rdp.clock < 0) rdp.main();
+  if(pif.clock < 0) pif.main();
 
   queue.step(clocks, [](u32 event) {
     switch(event) {
