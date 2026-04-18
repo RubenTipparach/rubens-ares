@@ -66,9 +66,9 @@ $(object.path)/alp-bridge.o: ../angrylion/angrylion_bridge.c
 	$(info Compiling angrylion bridge ...)
 	@$(compiler) -std=c11 $(angrylion.flags) $(flags.deps) -c $< $(call obj,$@)
 
-$(object.path)/alp-parallel.o: $(angrylion.src)/parallel.cpp
-	$(info Compiling angrylion parallel ...)
-	@$(compiler) $(flags.cpp) $(angrylion.flags) $(flags.deps) -pthread -c $< $(call obj,$@)
+$(object.path)/alp-parallel.o: ../angrylion/parallel_stub.c
+	$(info Compiling angrylion parallel stub ...)
+	@$(compiler) -std=c11 $(angrylion.flags) $(flags.deps) -c $< $(call obj,$@)
 
 $(object.path)/alp-msg.o: ../angrylion/msg_stub.c
 	$(info Compiling angrylion msg stub ...)

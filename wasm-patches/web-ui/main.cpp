@@ -481,6 +481,8 @@ static struct {
   double syncTime = 0;     // cpu.synchronize() (RSP, RDP, VI, etc.)
   double renderTime = 0;   // renderFrame() (WebGPU upload)
   double totalTime = 0;    // full mainLoop time
+  double minFrameMs = 1e9; // min totalMs for a single browser frame
+  double maxFrameMs = 0;   // max totalMs for a single browser frame
   u32 instrCount = 0;
   u32 loopCount = 0;       // browser frames
   u32 n64Frames = 0;       // VI refreshes
@@ -526,13 +528,16 @@ static void mainLoop() {
   double rStart = emscripten_get_now();
   renderFrame();
   double rEnd = emscripten_get_now();
+  double frameMs = rEnd - loopStart;
   prof.renderTime += (rEnd - rStart);
-  prof.totalTime += (rEnd - loopStart);
+  prof.totalTime += frameMs;
+  if(frameMs < prof.minFrameMs) prof.minFrameMs = frameMs;
+  if(frameMs > prof.maxFrameMs) prof.maxFrameMs = frameMs;
   prof.loopCount++;
 
-  // Report every 5 seconds
+  // Report every 1 second
   double now = emscripten_get_now();
-  if(now - prof.lastReport > 5000.0) {
+  if(now - prof.lastReport > 1000.0) {
     double sec = (now - prof.lastReport) / 1000.0;
     double loops = prof.loopCount > 0 ? prof.loopCount : 1;
     double rdpTime = g_prof_rdp_time;
@@ -547,6 +552,8 @@ static void mainLoop() {
     g_prof_rsp_time = 0;
     g_prof_rdp_main_time = 0;
     g_prof_pif_time = 0;
+    // Set max on Module so JS can read it (EM_ASM limited to 16 params)
+    EM_ASM({ Module._profMaxFrameMs = $0; }, prof.maxFrameMs);
     EM_ASM({
       if(Module.onProfile) Module.onProfile({
         buildId:     UTF8ToString($15),
@@ -555,6 +562,8 @@ static void mainLoop() {
         rdpMs:       ($9 / $6).toFixed(2),
         renderMs:    ($2 / $6).toFixed(2),
         totalMs:     ($3 / $6).toFixed(2),
+        minFrameMs:  $8.toFixed(2),
+        maxFrameMs:  (Module._profMaxFrameMs || 0).toFixed(2),
         instrPerSec: (($4 / $7) / 1e6).toFixed(2),
         n64Fps:      ($5 / $7).toFixed(1),
         browserFps:  ($6 / $7).toFixed(1),
@@ -568,12 +577,14 @@ static void mainLoop() {
       prof.cpuTime, prof.syncTime, prof.renderTime, prof.totalTime,
       (double)prof.instrCount, (double)prof.n64Frames,
       (double)prof.loopCount, sec,
-      0.0, rdpTime,
+      prof.minFrameMs, rdpTime,
       viTime, aiTime, rspTime, rdpMainTime, pifTime,
       BUILD_ID
     );
 
     prof.cpuTime = prof.syncTime = prof.renderTime = prof.totalTime = 0;
+    prof.minFrameMs = 1e9;
+    prof.maxFrameMs = 0;
     prof.instrCount = prof.loopCount = prof.n64Frames = 0;
     prof.lastReport = now;
   }

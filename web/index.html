@@ -323,10 +323,14 @@
 
   <div id="profile-panel" style="margin-top:12px;width:640px;background:#0d1117;border:1px solid #0f3460;border-radius:6px;padding:10px;font-family:'Cascadia Code','Consolas',monospace;font-size:12px;color:#8b949e;">
     <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-      <span style="color:#4ecca3;font-weight:bold;">Profile (per browser frame avg)</span>
-      <button id="btn-copy-profile" style="padding:2px 8px;font-size:11px;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
+      <span style="color:#4ecca3;font-weight:bold;">Profile (EMA-smoothed live)</span>
+      <div>
+        <button id="btn-benchmark" style="padding:2px 8px;font-size:11px;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Benchmark</button>
+        <button id="btn-copy-profile" style="padding:2px 8px;font-size:11px;border:1px solid #0f3460;border-radius:4px;background:#16213e;color:#8b949e;cursor:pointer;">Copy</button>
+      </div>
     </div>
     <pre id="profile-data" style="margin:0;white-space:pre;">Waiting for data...</pre>
+    <pre id="benchmark-data" style="margin:6px 0 0;white-space:pre;display:none;color:#f0a500;border-top:1px solid #0f3460;padding-top:6px;"></pre>
   </div>
 
   <!-- ── Touch controller overlay (shown on mobile when ROM is loaded) ── -->
@@ -479,32 +483,160 @@
       if (profileWs && profileWs.readyState === 1) {
         profileWs.send(JSON.stringify({ type: 'profile', data: p }));
         log('[heartbeat] build=' + (p.buildId || '?') + ' uptime=' + uptimeSec + 's n64fps=' + p.n64Fps + ' total=' + p.totalMs + 'ms');
-      } else {
-        log('[heartbeat] ws not connected, sample dropped');
       }
     }
 
-    // Profile display
+    // ── EMA-smoothed live profile display ──
+    var ema = null;  // smoothed values, initialized on first sample
+    var EMA_ALPHA = 0.3;  // 0 = no change, 1 = no smoothing
     var lastProfile = '';
+
+    function emaUpdate(prev, cur, alpha) {
+      return prev === null ? cur : prev * (1 - alpha) + cur * alpha;
+    }
+
+    // ── Benchmark accumulator ──
+    var benchmark = {
+      running: false,
+      samples: [],     // per-interval totalMs averages
+      allMin: [],      // per-interval min frame times
+      allMax: [],      // per-interval max frame times
+      startTime: 0,
+      totalFrames: 0,
+    };
+
+    function benchmarkStart() {
+      benchmark.running = true;
+      benchmark.samples = [];
+      benchmark.allMin = [];
+      benchmark.allMax = [];
+      benchmark.totalFrames = 0;
+      benchmark.startTime = Date.now();
+      document.getElementById('btn-benchmark').textContent = 'Stop';
+      document.getElementById('btn-benchmark').style.color = '#e94560';
+      document.getElementById('benchmark-data').style.display = 'none';
+    }
+
+    function percentile(sorted, p) {
+      var idx = Math.ceil(p / 100 * sorted.length) - 1;
+      return sorted[Math.max(0, idx)];
+    }
+
+    function benchmarkStop() {
+      benchmark.running = false;
+      document.getElementById('btn-benchmark').textContent = 'Benchmark';
+      document.getElementById('btn-benchmark').style.color = '#8b949e';
+
+      var el = document.getElementById('benchmark-data');
+      if (benchmark.samples.length < 2) {
+        el.textContent = 'Not enough data (need at least 2 samples)';
+        el.style.display = 'block';
+        return;
+      }
+
+      var s = benchmark.samples;
+      var n = s.length;
+      var sorted = s.slice().sort(function(a, b) { return a - b; });
+      var sum = s.reduce(function(a, b) { return a + b; }, 0);
+      var mean = sum / n;
+      var variance = s.reduce(function(a, v) { return a + (v - mean) * (v - mean); }, 0) / n;
+      var stddev = Math.sqrt(variance);
+
+      // Global min/max from per-interval extremes
+      var globalMin = Math.min.apply(null, benchmark.allMin);
+      var globalMax = Math.max.apply(null, benchmark.allMax);
+
+      var elapsed = ((Date.now() - benchmark.startTime) / 1000).toFixed(1);
+
+      var lines = [
+        '══════ BENCHMARK RESULTS ══════',
+        'Duration:     ' + elapsed + 's (' + benchmark.totalFrames + ' frames, ' + n + ' samples)',
+        '───────────────────────────────',
+        'Total ms/frame (browser frame):',
+        '  Mean:       ' + mean.toFixed(2) + ' ms',
+        '  Std Dev:    ' + stddev.toFixed(2) + ' ms',
+        '  Min:        ' + globalMin.toFixed(2) + ' ms',
+        '  Max:        ' + globalMax.toFixed(2) + ' ms',
+        '  P1:         ' + percentile(sorted, 1).toFixed(2) + ' ms',
+        '  P50:        ' + percentile(sorted, 50).toFixed(2) + ' ms',
+        '  P99:        ' + percentile(sorted, 99).toFixed(2) + ' ms',
+        '═══════════════════════════════',
+      ];
+      el.textContent = lines.join('\n');
+      el.style.display = 'block';
+    }
+
+    document.getElementById('btn-benchmark').addEventListener('click', function() {
+      if (benchmark.running) benchmarkStop(); else benchmarkStart();
+    });
+
     function updateProfile(p) {
       sendProfileToServer(p);
+
+      // Feed benchmark accumulator
+      if (benchmark.running) {
+        benchmark.samples.push(parseFloat(p.totalMs));
+        benchmark.allMin.push(parseFloat(p.minFrameMs || p.totalMs));
+        benchmark.allMax.push(parseFloat(p.maxFrameMs || p.totalMs));
+        benchmark.totalFrames += parseInt(p.browserFps) || 0;
+      }
+
+      // EMA smoothing
+      var raw = {
+        cpuMs: parseFloat(p.cpuMs),
+        syncMs: parseFloat(p.syncMs),
+        rdpMs: parseFloat(p.rdpMs),
+        rspMs: parseFloat(p.rspMs),
+        viMs: parseFloat(p.viMs),
+        aiMs: parseFloat(p.aiMs),
+        rdpMainMs: parseFloat(p.rdpMainMs),
+        pifMs: parseFloat(p.pifMs),
+        renderMs: parseFloat(p.renderMs),
+        totalMs: parseFloat(p.totalMs),
+        instrPerSec: parseFloat(p.instrPerSec),
+        n64Fps: parseFloat(p.n64Fps),
+        browserFps: parseFloat(p.browserFps),
+      };
+
+      if (!ema) {
+        ema = Object.assign({}, raw);
+      } else {
+        for (var k in raw) {
+          ema[k] = emaUpdate(ema[k], raw[k], EMA_ALPHA);
+        }
+      }
+
+      var minF = p.minFrameMs || '—';
+      var maxF = p.maxFrameMs || '—';
+
       var lines = [
-        'CPU loop:       ' + p.cpuMs.padStart(8) + ' ms/frame',
-        'Sync (subsys):  ' + p.syncMs.padStart(8) + ' ms/frame',
-        'RDP (angrylion):' + p.rdpMs.padStart(8) + ' ms/frame',
-        'WebGPU render:  ' + p.renderMs.padStart(8) + ' ms/frame',
-        'Total:          ' + p.totalMs.padStart(8) + ' ms/frame',
+        'CPU loop:       ' + ema.cpuMs.toFixed(2).padStart(8) + ' ms/frame',
+        'Sync total:     ' + ema.syncMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  RSP:          ' + ema.rspMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  RDP render:   ' + ema.rdpMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  RDP main:     ' + ema.rdpMainMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  VI:           ' + ema.viMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  AI:           ' + ema.aiMs.toFixed(2).padStart(8) + ' ms/frame',
+        '  PIF:          ' + ema.pifMs.toFixed(2).padStart(8) + ' ms/frame',
+        'WebGPU render:  ' + ema.renderMs.toFixed(2).padStart(8) + ' ms/frame',
+        'Total:          ' + ema.totalMs.toFixed(2).padStart(8) + ' ms/frame',
+        'Frame range:    ' + (minF + ' .. ' + maxF + ' ms').padStart(20),
         '─────────────────────────────────',
-        'MIPS instr/sec: ' + (p.instrPerSec + ' M').padStart(9),
-        'N64 FPS:        ' + p.n64Fps.padStart(8),
-        'Browser FPS:    ' + p.browserFps.padStart(8),
+        'MIPS instr/sec: ' + (ema.instrPerSec.toFixed(2) + ' M').padStart(9),
+        'N64 FPS:        ' + ema.n64Fps.toFixed(1).padStart(8),
+        'Browser FPS:    ' + ema.browserFps.toFixed(1).padStart(8),
       ];
       lastProfile = lines.join('\n');
       document.getElementById('profile-data').textContent = lastProfile;
     }
 
     document.getElementById('btn-copy-profile').addEventListener('click', function() {
-      navigator.clipboard.writeText(lastProfile).then(function() {
+      var copyText = lastProfile;
+      var benchEl = document.getElementById('benchmark-data');
+      if (benchEl.style.display !== 'none' && benchEl.textContent) {
+        copyText += '\n\n' + benchEl.textContent;
+      }
+      navigator.clipboard.writeText(copyText).then(function() {
         document.getElementById('btn-copy-profile').textContent = 'Copied!';
         setTimeout(function() { document.getElementById('btn-copy-profile').textContent = 'Copy'; }, 1000);
       });
