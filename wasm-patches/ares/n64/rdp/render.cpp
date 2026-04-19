@@ -230,21 +230,15 @@ auto RDP::render() -> void {
     if(command.freeze) dp_status |= 0x002;
     if(command.flush)  dp_status |= 0x004;
 
-    // Process RDP commands synchronously
-    u32 new_current = angrylion_process(
+    // Dispatch RDP commands to worker thread (non-blocking).
+    // angrylion_dispatch will wait if the previous dispatch is still running,
+    // then kick off the new work and return immediately.
+    angrylion_dispatch(
       (u32)command.start, (u32)command.end,
       (u32)command.current, dp_status
     );
-    command.current = new_current;
-
-    // Handle sync_full interrupt
-    if(angrylion_sync_full_pending) {
-      angrylion_sync_full_pending = false;
-      mi.raise(MI::IRQ::DP);
-      command.bufferBusy = 0;
-      command.pipeBusy = 0;
-      command.startGclk = 0;
-    }
+    // Don't sync here — let CPU continue while RDP renders.
+    // We'll sync when we check for sync_full below or on next render call.
     g_prof_rdp_time += emscripten_get_now() - _rdp_start;
     return;
   }

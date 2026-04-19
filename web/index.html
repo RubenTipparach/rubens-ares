@@ -59,6 +59,7 @@
     }
 
     #canvas-container {
+      position: relative;
       margin-top: 24px;
       border: 3px solid #0f3460;
       border-radius: 8px;
@@ -250,6 +251,7 @@
 
   <div id="canvas-container">
     <canvas id="canvas" width="640" height="480" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="fps-overlay" style="position:absolute;top:4px;left:4px;font-family:'Cascadia Code',monospace;font-size:11px;color:#4ecca3;background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;pointer-events:none;display:none;z-index:10;"></div>
   </div>
 
   <div id="status-bar" class="loading">Initializing...</div>
@@ -628,6 +630,11 @@
       ];
       lastProfile = lines.join('\n');
       document.getElementById('profile-data').textContent = lastProfile;
+
+      // Update FPS overlay on canvas
+      var fpsEl = document.getElementById('fps-overlay');
+      fpsEl.style.display = 'block';
+      fpsEl.textContent = 'N64: ' + ema.n64Fps.toFixed(1) + '  Browser: ' + ema.browserFps.toFixed(1);
     }
 
     document.getElementById('btn-copy-profile').addEventListener('click', function() {

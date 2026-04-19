@@ -1,5 +1,9 @@
 #include <n64/n64.hpp>
 
+#if defined(USE_ANGRYLION)
+extern "C" volatile bool angrylion_sync_full_pending;
+#endif
+
 namespace ares::Nintendo64 {
 
 CPU cpu;
@@ -53,11 +57,24 @@ auto CPU::synchronize() -> void {
   rsp.clock -= clocks;
   rdp.clock -= clocks;
   pif.clock -= clocks;
-  if( vi.clock < 0)  vi.main();
-  if( ai.clock < 0)  ai.main();
-  if(rsp.clock < 0) rsp.main();
-  if(rdp.clock < 0) rdp.main();
-  if(pif.clock < 0) pif.main();
+  vi.main();
+  ai.main();
+  rsp.main();
+  rdp.main();
+  pif.main();
+
+  // Check if async RDP worker finished and needs to raise interrupt
+  #if defined(USE_ANGRYLION)
+  {
+    if(angrylion_sync_full_pending) {
+      angrylion_sync_full_pending = false;
+      mi.raise(MI::IRQ::DP);
+      rdp.command.bufferBusy = 0;
+      rdp.command.pipeBusy = 0;
+      rdp.command.startGclk = 0;
+    }
+  }
+  #endif
 
   queue.step(clocks, [](u32 event) {
     switch(event) {
